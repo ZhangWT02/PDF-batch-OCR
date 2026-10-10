@@ -2,15 +2,15 @@
 
 # PDF Batch OCR
 
-**面向影印书的本地批量中英文 OCR 工具**
+**面向扫描版书籍的本地批量多语言 OCR 工具**
 
 [English](README.md) · **简体中文**
 
 </div>
 
-面向影印书的本地批量 OCR 工具，支持中英文识别、图像预处理、受控并行和文字层安全校验。
+本工具在本地批量处理扫描版书籍 PDF，识别语言可通过 `--language` 配置，并提供图像预处理、受控并行和文字层安全校验。
 
-> A local-first batch OCR pipeline for scanned books, with Chinese/English recognition,
+> A local-first batch OCR pipeline for scanned books, with configurable Tesseract languages,
 > image preprocessing, controlled parallelism, and text-layer-safe compression.
 
 所有文档均在本机处理，程序不会上传 PDF 或 OCR 内容。请仅处理你有权使用的文档。
@@ -20,7 +20,7 @@
 - 自动发现文件夹中的 PDF，可选择递归扫描；
 - 300 DPI 页面渲染、小角度纠偏、去噪和自适应二值化；
 - 最多 4 个独立进程并行预处理，并保持原始页序；
-- 默认使用 `chi_sim+eng` 识别简体中文和英文；
+- 可通过 `--language` 使用任意已安装的 Tesseract 语言或语言组合，默认值为简体中文和英文（`chi_sim+eng`）；
 - 生成不可见、可搜索的 OCR 文字层；
 - 成品超过 50 MB 时仅压缩页面图像；
 - 压缩前后逐页核对文字内容，校验失败时保留未压缩版本；
@@ -51,13 +51,13 @@ flowchart LR
 5. OCR 成品超过 50 MB（50,000,000 字节）时，使用 Ghostscript 只对页面图像降采样/压缩；
 6. 比较压缩前后的页数和可提取文字量。校验失败时自动保留未压缩的 OCR 文件。
 
-默认识别语言为简体中文和英文：`chi_sim+eng`。
+识别语言可通过 `--language` 配置，支持 Tesseract 中已安装的任意语言数据。默认值为简体中文和英文：`chi_sim+eng`。
 
 ## 快速开始
 
 需要 Python 3.11+，以及系统程序：
 
-- Tesseract OCR，并安装 `chi_sim`、`eng` 语言数据；
+- Tesseract OCR，并安装所选语言需要的语言数据（默认配置需要 `chi_sim` 和 `eng`）；
 - Ghostscript（超阈值的图像压缩所需）；
 - 推荐安装 Noto CJK 字体，供新版 OCRmyPDF 正确构造中日韩文字层。
 
@@ -156,7 +156,7 @@ python .\batch_ocr.py "D:\Books\待处理" `
 python .\batch_ocr.py "D:\Books\待处理" --binarization none
 ```
 
-繁体中文和英文：
+指定任意已安装的 Tesseract 语言或语言组合，例如繁体中文和英文：
 
 ```powershell
 python .\batch_ocr.py "D:\Books\待处理" --language chi_tra+eng

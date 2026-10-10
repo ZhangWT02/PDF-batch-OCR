@@ -2,13 +2,13 @@
 
 # PDF Batch OCR
 
-**Local-first batch Chinese and English OCR for scanned books**
+**Local-first batch multilingual OCR for scanned books**
 
 **English** · [简体中文](README.zh-CN.md)
 
 </div>
 
-PDF Batch OCR processes folders of scanned-book PDFs locally, with image preprocessing, controlled parallelism, searchable text layers, and text-safe conditional compression.
+PDF Batch OCR processes folders of scanned-book PDFs locally, with configurable Tesseract recognition languages, image preprocessing, controlled parallelism, searchable text layers, and text-safe conditional compression.
 
 No PDF or OCR content is uploaded by this program. Only process documents that you are authorized to use.
 
@@ -17,7 +17,7 @@ No PDF or OCR content is uploaded by this program. Only process documents that y
 - Discover PDFs in a folder, with optional recursive scanning.
 - Render pages at 300 DPI, correct small-angle skew, remove noise, and apply adaptive binarization.
 - Preprocess pages in up to four independent processes while preserving page order.
-- Recognize Simplified Chinese and English with `chi_sim+eng` by default.
+- Recognize any installed Tesseract language or language combination through `--language`; the default is Simplified Chinese and English (`chi_sim+eng`).
 - Add an invisible, searchable OCR text layer.
 - Compress page images only when the result exceeds 50 MB.
 - Compare page count and extracted text before accepting a compressed result.
@@ -48,13 +48,13 @@ The default workflow:
 5. If the OCR result exceeds 50 MB (50,000,000 bytes), Ghostscript downsamples and compresses page images only.
 6. Compares page counts and extractable text before and after compression. If verification fails, the uncompressed OCR file is kept.
 
-The default recognition languages are Simplified Chinese and English: `chi_sim+eng`.
+Recognition languages are configurable through `--language` and may use any language data installed in Tesseract. The default is Simplified Chinese and English: `chi_sim+eng`.
 
 ## Quick start
 
 Python 3.11 or later is required, along with these system programs:
 
-- Tesseract OCR with the `chi_sim` and `eng` language data.
+- Tesseract OCR with the language data required for your chosen languages (`chi_sim` and `eng` for the default configuration).
 - Ghostscript for image compression above the configured threshold.
 - Noto CJK fonts are recommended so recent OCRmyPDF versions can construct CJK text layers correctly.
 
@@ -151,7 +151,7 @@ Disable binarization for documents containing many photographs or illustrations:
 python .\batch_ocr.py "D:\Books\ToProcess" --binarization none
 ```
 
-Recognize Traditional Chinese and English:
+Choose any installed Tesseract language or language combination—for example, Traditional Chinese and English:
 
 ```powershell
 python .\batch_ocr.py "D:\Books\ToProcess" --language chi_tra+eng

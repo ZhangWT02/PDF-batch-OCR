@@ -77,7 +77,7 @@ class Result:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="批量预处理并 OCR 影印 PDF；超过阈值时仅重采样/压缩图像。",
+        description="批量预处理并 OCR 扫描型 PDF；超过阈值时仅重采样/压缩图像。",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("input_dir", type=Path, help="包含 PDF 的输入文件夹")
