@@ -1,76 +1,79 @@
+<div align="center">
+
 # PDF Batch OCR
 
-面向影印书的本地批量 OCR 工具，支持中英文识别、图像预处理、受控并行和文字层安全校验。
+**Local-first batch Chinese and English OCR for scanned books**
 
-> A local-first batch OCR pipeline for scanned books, with Chinese/English recognition,
-> image preprocessing, controlled parallelism, and text-layer-safe compression.
+**English** · [简体中文](README.zh-CN.md)
 
-所有文档均在本机处理，程序不会上传 PDF 或 OCR 内容。请仅处理你有权使用的文档。
+</div>
 
-## 功能
+PDF Batch OCR processes folders of scanned-book PDFs locally, with image preprocessing, controlled parallelism, searchable text layers, and text-safe conditional compression.
 
-- 自动发现文件夹中的 PDF，可选择递归扫描；
-- 300 DPI 页面渲染、小角度纠偏、去噪和自适应二值化；
-- 最多 4 个独立进程并行预处理，并保持原始页序；
-- 默认使用 `chi_sim+eng` 识别简体中文和英文；
-- 生成不可见、可搜索的 OCR 文字层；
-- 成品超过 50 MB 时仅压缩页面图像；
-- 压缩前后逐页核对文字内容，校验失败时保留未压缩版本；
-- 单个文件失败不会中断整批任务。
+No PDF or OCR content is uploaded by this program. Only process documents that you are authorized to use.
 
-## 处理流程
+## Features
+
+- Discover PDFs in a folder, with optional recursive scanning.
+- Render pages at 300 DPI, correct small-angle skew, remove noise, and apply adaptive binarization.
+- Preprocess pages in up to four independent processes while preserving page order.
+- Recognize Simplified Chinese and English with `chi_sim+eng` by default.
+- Add an invisible, searchable OCR text layer.
+- Compress page images only when the result exceeds 50 MB.
+- Compare page count and extracted text before accepting a compressed result.
+- Continue processing the batch when an individual file fails.
+
+## Pipeline
 
 ```mermaid
 flowchart LR
-    A[扫描 PDF] --> B[逐页渲染]
-    B --> C[纠偏 / 去噪 / 二值化]
-    C --> D[按原页序组装]
+    A[Discover PDFs] --> B[Render pages]
+    B --> C[Deskew / Denoise / Binarize]
+    C --> D[Reassemble in page order]
     D --> E[OCRmyPDF + Tesseract]
-    E --> F{超过大小阈值?}
-    F -- 否 --> G[输出可搜索 PDF]
-    F -- 是 --> H[仅压缩图像]
-    H --> I{页数与文字层一致?}
-    I -- 是 --> G
-    I -- 否 --> J[回退到未压缩 OCR 文件]
+    E --> F{Above size threshold?}
+    F -- No --> G[Searchable PDF]
+    F -- Yes --> H[Compress images only]
+    H --> I{Page count and text match?}
+    I -- Yes --> G
+    I -- No --> J[Keep uncompressed OCR PDF]
 ```
 
-默认流程是：
+The default workflow:
 
-1. 以 300 DPI 逐页渲染，自动估计并纠正小角度倾斜；
-2. 中值去噪；
-3. 自适应二值化；
-4. 使用 OCRmyPDF + Tesseract 写入不可见、可搜索的文字层；
-5. OCR 成品超过 50 MB（50,000,000 字节）时，使用 Ghostscript 只对页面图像降采样/压缩；
-6. 比较压缩前后的页数和可提取文字量。校验失败时自动保留未压缩的 OCR 文件。
+1. Renders each page at 300 DPI and corrects small-angle skew.
+2. Applies median denoising.
+3. Applies adaptive binarization.
+4. Uses OCRmyPDF and Tesseract to add an invisible, searchable text layer.
+5. If the OCR result exceeds 50 MB (50,000,000 bytes), Ghostscript downsamples and compresses page images only.
+6. Compares page counts and extractable text before and after compression. If verification fails, the uncompressed OCR file is kept.
 
-默认识别语言为简体中文和英文：`chi_sim+eng`。
+The default recognition languages are Simplified Chinese and English: `chi_sim+eng`.
 
-## 快速开始
+## Quick start
 
-需要 Python 3.11+，以及系统程序：
+Python 3.11 or later is required, along with these system programs:
 
-- Tesseract OCR，并安装 `chi_sim`、`eng` 语言数据；
-- Ghostscript（超阈值的图像压缩所需）；
-- 推荐安装 Noto CJK 字体，供新版 OCRmyPDF 正确构造中日韩文字层。
+- Tesseract OCR with the `chi_sim` and `eng` language data.
+- Ghostscript for image compression above the configured threshold.
+- Noto CJK fonts are recommended so recent OCRmyPDF versions can construct CJK text layers correctly.
 
-Windows 的 Tesseract、Ghostscript 与 OCRmyPDF 安装方式可参考
-[OCRmyPDF 官方安装说明](https://ocrmypdf.readthedocs.io/en/latest/installation.html#native-windows)。
+For Windows installation details, see the [OCRmyPDF native Windows installation guide](https://ocrmypdf.readthedocs.io/en/latest/installation.html#native-windows).
 
-### Conda（推荐）
+### Conda (recommended)
 
 ```powershell
 conda env create -f environment.yml
 conda activate pdf-batch-ocr
 ```
 
-部分 Windows Conda 构建会把 Tesseract 语言数据和输出配置装到不同目录。如果运行时出现
-`Can't open hocr`，执行一次：
+Some Windows Conda packages install Tesseract language data and output configurations in different directories. If you encounter `Can't open hocr`, run this once:
 
 ```powershell
 .\scripts\repair_conda_tessdata.ps1
 ```
 
-检查环境：
+Verify the environment:
 
 ```powershell
 python -m pip check
@@ -81,7 +84,7 @@ gswin64c -version
 
 ### venv + pip
 
-确认命令行能够找到它们：
+First verify that the system executables are available:
 
 ```powershell
 tesseract --version
@@ -89,7 +92,7 @@ tesseract --list-langs
 gswin64c -version
 ```
 
-创建虚拟环境并安装 Python 依赖：
+Create a virtual environment and install the Python dependencies:
 
 ```powershell
 python -m venv .venv
@@ -98,101 +101,101 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-也可以把项目安装为命令行工具：
+You can also install the project as a command-line tool:
 
 ```powershell
 python -m pip install -e .
-pdf-batch-ocr "D:\Books\待处理"
+pdf-batch-ocr "D:\Books\ToProcess"
 ```
 
-## 使用
+## Usage
 
-处理一个文件夹里的全部 PDF：
+Process every PDF in a folder:
 
 ```powershell
-python .\batch_ocr.py "D:\Books\待处理"
+python .\batch_ocr.py "D:\Books\ToProcess"
 ```
 
-预处理默认最多使用 4 个独立进程。可根据 CPU 和内存调整：
+Preprocessing uses up to four independent processes by default. Adjust this for available CPU and memory:
 
 ```powershell
-python .\batch_ocr.py "D:\Books\待处理" --preprocess-jobs 4
+python .\batch_ocr.py "D:\Books\ToProcess" --preprocess-jobs 4
 ```
 
-内存不足或需要恢复串行处理时：
+Use serial preprocessing when memory is limited:
 
 ```powershell
-python .\batch_ocr.py "D:\Books\待处理" --preprocess-jobs 1
+python .\batch_ocr.py "D:\Books\ToProcess" --preprocess-jobs 1
 ```
 
-结果默认写入 `D:\Books\待处理\ocr_output`，文件名形如 `书名_ocr.pdf`。输出存在时会跳过；确认需要重做可加 `--overwrite`。
+Results are written to `D:\Books\ToProcess\ocr_output` by default, with names such as `book_ocr.pdf`. Existing outputs are skipped; use `--overwrite` to regenerate them.
 
-指定输出目录并递归处理：
+Specify an output directory and scan recursively:
 
 ```powershell
-python .\batch_ocr.py "D:\Books\待处理" -o "D:\Books\OCR完成" --recursive
+python .\batch_ocr.py "D:\Books\ToProcess" -o "D:\Books\Completed" --recursive
 ```
 
-调整阈值和图像压缩参数：
+Adjust the size threshold and image-compression settings:
 
 ```powershell
-python .\batch_ocr.py "D:\Books\待处理" `
+python .\batch_ocr.py "D:\Books\ToProcess" `
   --compression-threshold-mb 50 `
   --compression-dpi 200 `
   --jpeg-quality 72
 ```
 
-有大量照片或插图、不希望二值化时：
+Disable binarization for documents containing many photographs or illustrations:
 
 ```powershell
-python .\batch_ocr.py "D:\Books\待处理" --binarization none
+python .\batch_ocr.py "D:\Books\ToProcess" --binarization none
 ```
 
-繁体中文和英文：
+Recognize Traditional Chinese and English:
 
 ```powershell
-python .\batch_ocr.py "D:\Books\待处理" --language chi_tra+eng
+python .\batch_ocr.py "D:\Books\ToProcess" --language chi_tra+eng
 ```
 
-查看全部可调参数：
+Show every available option:
 
 ```powershell
 python .\batch_ocr.py --help
 ```
 
-## 参数建议
+## Recommended settings
 
-| 场景 | 建议 |
+| Document type | Recommendation |
 |---|---|
-| 泛黄、明暗不均的纯文字书 | 默认 `--binarization adaptive` |
-| 背景较均匀的扫描件 | `--binarization otsu` |
-| 含照片、彩图或细腻灰阶插图 | `--binarization none` |
-| 椒盐噪点 | 默认 `--denoise median` |
-| 轻微连续噪声 | `--denoise nlm --denoise-strength 7` |
-| 小字、古籍批注 | 可保留 `--dpi 300`，不要把压缩 DPI 调得过低 |
+| Yellowed or uneven text pages | Default `--binarization adaptive` |
+| Scans with a uniform background | `--binarization otsu` |
+| Photographs, color pages, or detailed grayscale illustrations | `--binarization none` |
+| Salt-and-pepper noise | Default `--denoise median` |
+| Light continuous noise | `--denoise nlm --denoise-strength 7` |
+| Small type or annotations in historical books | Keep `--dpi 300`; avoid an excessively low compression DPI |
 
-压缩阶段不会把整页重新栅格化：Ghostscript 只设置图像降采样和图像编码参数，文字及字体对象仍作为文字层处理。脚本还会逐页读取压缩前后的文字层；若文字内容不是完全一致，压缩结果不会被采用。
+The compression stage does not rasterize the whole page. Ghostscript is configured to downsample and encode images while retaining text and font objects as the text layer. The script also reads each page's text layer before and after compression; a result is rejected unless the extracted text matches exactly.
 
-## 注意事项
+## Notes
 
-- 默认二值化会把彩色页转为黑白。含有重要图片时使用 `--binarization none`。
-- 自动纠偏处理的是常见的小角度歪斜；90/180/270 度方向由 OCRmyPDF 的自动旋转处理。
-- `--preprocess-jobs` 控制渲染、纠偏、去噪、二值化和 PNG 编码的并行进程数；`--jobs` 仅控制后续 OCR。
-- 单个 PDF 失败不会中断同一批次中的其他文件；最后会打印成功、跳过和失败汇总。
-- 使用 `--keep-temp` 可以保留预处理页面和中间 PDF，便于排查特殊版面。
-- `books/`、所有 PDF 和 OCR 中间产物默认被 Git 忽略，避免误上传私人或受版权保护的文档。
+- Default binarization converts color pages to black and white. Use `--binarization none` when important images are present.
+- Deskew corrects common small-angle page skew; OCRmyPDF handles 90/180/270-degree orientation with automatic rotation.
+- `--preprocess-jobs` controls parallel rendering, deskewing, denoising, binarization, and PNG encoding. `--jobs` controls the later OCR stage only.
+- A failed PDF does not stop other files in the batch. A summary of successful, skipped, and failed files is printed at the end.
+- Use `--keep-temp` to retain preprocessed pages and intermediate PDFs when diagnosing unusual layouts.
+- `books/`, all PDFs, and OCR intermediate files are ignored by Git by default to avoid uploading private or copyrighted documents.
 
-## 开发与测试
+## Development and testing
 
-项目使用 Python 标准库 `unittest`，基础测试不依赖 OCR 系统程序：
+The base test suite uses Python's standard-library `unittest` and does not require OCR system programs:
 
 ```powershell
 python -m py_compile .\batch_ocr.py .\tests\test_batch_ocr.py
 python -m unittest discover -s tests -v
 ```
 
-贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。Bug 报告中不要上传机密或受版权保护的 PDF。
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing. Do not attach confidential or copyrighted PDFs to bug reports.
 
-## 许可证
+## License
 
-本项目使用 [MIT License](LICENSE)。Tesseract、Ghostscript、OCRmyPDF 及其他第三方依赖分别适用其自身许可证。
+This project is licensed under the [MIT License](LICENSE). Tesseract, Ghostscript, OCRmyPDF, and other third-party dependencies remain subject to their respective licenses.
