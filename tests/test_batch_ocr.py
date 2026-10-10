@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import batch_ocr
@@ -111,6 +112,62 @@ class BatchOcrTests(unittest.TestCase):
             self.assertTrue(result.compressed)
             self.assertEqual(output.stat().st_size, 60)
             compressor.assert_called_once()
+
+    def test_compression_uses_valid_ghostscript_filter_values(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "input.pdf"
+            destination = root / "output.pdf"
+            source.touch()
+            config = make_config(root)
+
+            with (
+                patch.object(batch_ocr, "find_ghostscript", return_value="gswin64c"),
+                patch.object(
+                    batch_ocr.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+                ) as run,
+            ):
+                batch_ocr.compress_images_only(source, destination, config)
+
+            command = run.call_args.args[0]
+            self.assertIn("-sColorImageFilter=DCTEncode", command)
+            self.assertIn("-sGrayImageFilter=DCTEncode", command)
+            self.assertIn("-sMonoImageFilter=CCITTFaxEncode", command)
+            self.assertNotIn("-sColorImageFilter=/DCTEncode", command)
+
+    def test_find_ghostscript_checks_active_conda_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            conda_prefix = Path(directory)
+            executable = conda_prefix / "Library" / "bin" / "gswin64c.exe"
+            executable.parent.mkdir(parents=True)
+            executable.touch()
+
+            with (
+                patch.object(batch_ocr.shutil, "which", return_value=None),
+                patch.dict(batch_ocr.os.environ, {"CONDA_PREFIX": str(conda_prefix)}),
+            ):
+                self.assertEqual(batch_ocr.find_ghostscript(), str(executable))
+
+    def test_compression_error_includes_ghostscript_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            config = make_config(root)
+            with (
+                patch.object(batch_ocr, "find_ghostscript", return_value="gswin64c"),
+                patch.object(
+                    batch_ocr.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(
+                        returncode=255,
+                        stdout="",
+                        stderr="Unrecoverable error: rangecheck in .putdeviceprops\n",
+                    ),
+                ),
+            ):
+                with self.assertRaisesRegex(batch_ocr.ProcessingError, "rangecheck"):
+                    batch_ocr.compress_images_only(root / "input.pdf", root / "output.pdf", config)
 
 
 if __name__ == "__main__":

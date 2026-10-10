@@ -578,6 +578,13 @@ def find_ghostscript() -> str | None:
         if executable:
             return executable
     if os.name == "nt":
+        conda_prefix = os.environ.get("CONDA_PREFIX")
+        if conda_prefix:
+            conda_bin = Path(conda_prefix) / "Library" / "bin"
+            for name in ("gswin64c.exe", "gswin32c.exe"):
+                candidate = conda_bin / name
+                if candidate.is_file():
+                    return str(candidate)
         roots = (
             Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "gs",
             Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")) / "gs",
@@ -641,18 +648,18 @@ def compress_images_only(source: Path, destination: Path, config: Config) -> Non
         "-dColorImageDownsampleThreshold=1.0",
         f"-dColorImageResolution={dpi}",
         "-dAutoFilterColorImages=false",
-        "-sColorImageFilter=/DCTEncode",
+        "-sColorImageFilter=DCTEncode",
         "-dDownsampleGrayImages=true",
         "-dGrayImageDownsampleType=/Bicubic",
         "-dGrayImageDownsampleThreshold=1.0",
         f"-dGrayImageResolution={dpi}",
         "-dAutoFilterGrayImages=false",
-        "-sGrayImageFilter=/DCTEncode",
+        "-sGrayImageFilter=DCTEncode",
         "-dDownsampleMonoImages=true",
         "-dMonoImageDownsampleType=/Subsample",
         "-dMonoImageDownsampleThreshold=1.0",
         f"-dMonoImageResolution={dpi}",
-        "-sMonoImageFilter=/CCITTFaxEncode",
+        "-sMonoImageFilter=CCITTFaxEncode",
         f"-dJPEGQ={config.jpeg_quality}",
         f"-sOutputFile={destination}",
         str(source),
@@ -663,8 +670,20 @@ def compress_images_only(source: Path, destination: Path, config: Config) -> Non
         dpi,
         config.jpeg_quality,
     )
-    completed = subprocess.run(command, check=False)
+    completed = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+    )
     if completed.returncode != 0:
+        diagnostic = (completed.stderr or completed.stdout or "").strip()
+        if diagnostic:
+            diagnostic = diagnostic.splitlines()[-1]
+            raise ProcessingError(
+                f"Ghostscript 压缩失败（退出码 {completed.returncode}）：{diagnostic}"
+            )
         raise ProcessingError(f"Ghostscript 压缩失败（退出码 {completed.returncode}）")
 
 
