@@ -1,0 +1,27 @@
+.venv/
+.conda/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+build/
+dist/
+.build-check/
+*.egg-info/
+
+# Local books and generated OCR artifacts must never be published.
+books/
+*.pdf
+*.hocr
+ocr_output/
+.*.partial
+.*.ocr-temp-*/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible failure or incorrect OCR pipeline behavior
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not upload confidential or copyrighted PDFs. Prefer logs and a small redistributable reproducer.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command
+      description: Paste the complete command, removing private paths if needed.
+      render: powershell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `python batch_ocr.py --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: dependency-versions
+    attributes:
+      label: Dependency versions
+      description: Include Python, OCRmyPDF, Tesseract and Ghostscript versions.
+    validations:
+      required: true

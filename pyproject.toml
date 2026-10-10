@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf-batch-ocr"
+version = "0.1.0"
+description = "Batch OCR pipeline for scanned books with preprocessing and text-safe conditional compression"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "PDF Batch OCR contributors" }]
+keywords = ["pdf", "ocr", "tesseract", "ocrmypdf", "scanned-books"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Graphics :: Capture :: Scanners",
+  "Topic :: Text Processing",
+]
+dependencies = [
+  "img2pdf>=0.5,<1",
+  "numpy>=1.24,<3",
+  "ocrmypdf>=17,<18",
+  "opencv-python-headless>=4.8,<5",
+  "Pillow>=10,<13",
+  "pypdf>=5,<7",
+  "pypdfium2>=4.28,<6",
+]
+
+[project.scripts]
+pdf-batch-ocr = "batch_ocr:main"
+
+[tool.setuptools]
+py-modules = ["batch_ocr"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

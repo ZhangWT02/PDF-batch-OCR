@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest a focused improvement to the OCR pipeline
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the workflow limitation or user need.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Explain the desired behavior and command-line interface.
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Performance and quality tradeoffs
+      description: Note expected effects on OCR accuracy, memory, runtime or PDF size.
