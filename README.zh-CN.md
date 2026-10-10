@@ -192,6 +192,8 @@ python .\batch_ocr.py --help
 
 ## 开发与测试
 
+计划中的 README 演示、Windows 一键安装程序和桌面可视化界面，请参阅[开发路线图](ROADMAP.zh-CN.md)。
+
 项目使用 Python 标准库 `unittest`，基础测试不依赖 OCR 系统程序：
 
 ```powershell

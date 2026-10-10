@@ -187,6 +187,9 @@ The compression stage does not rasterize the whole page. Ghostscript is configur
 
 ## Development and testing
 
+See the [project roadmap](ROADMAP.md) for the planned README demo, Windows
+installer, and desktop interface.
+
 The base test suite uses Python's standard-library `unittest` and does not require OCR system programs:
 
 ```powershell
