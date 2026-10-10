@@ -31,6 +31,7 @@ from typing import Iterable, Sequence
 LOG = logging.getLogger("batch-ocr")
 MB = 1_000_000
 VERSION = "0.1.0"
+IS_WINDOWS = os.name == "nt"
 
 
 class ProcessingError(RuntimeError):
@@ -236,9 +237,11 @@ def is_relative_to(path: Path, parent: Path) -> bool:
 
 def discover_pdfs(config: Config) -> list[Path]:
     iterator: Iterable[Path]
-    iterator = config.input_dir.rglob("*.pdf") if config.recursive else config.input_dir.glob("*.pdf")
+    iterator = config.input_dir.rglob("*") if config.recursive else config.input_dir.glob("*")
     files = []
     for path in iterator:
+        if not path.is_file() or path.suffix.lower() != ".pdf":
+            continue
         resolved = path.resolve()
         if is_relative_to(resolved, config.output_dir):
             continue
@@ -577,7 +580,7 @@ def find_ghostscript() -> str | None:
         executable = shutil.which(name)
         if executable:
             return executable
-    if os.name == "nt":
+    if IS_WINDOWS:
         conda_prefix = os.environ.get("CONDA_PREFIX")
         if conda_prefix:
             conda_bin = Path(conda_prefix) / "Library" / "bin"

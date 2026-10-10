@@ -146,6 +146,7 @@ class BatchOcrTests(unittest.TestCase):
 
             with (
                 patch.object(batch_ocr.shutil, "which", return_value=None),
+                patch.object(batch_ocr, "IS_WINDOWS", True),
                 patch.dict(batch_ocr.os.environ, {"CONDA_PREFIX": str(conda_prefix)}),
             ):
                 self.assertEqual(batch_ocr.find_ghostscript(), str(executable))
