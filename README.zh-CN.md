@@ -18,10 +18,12 @@
 ## 功能
 
 - 自动发现文件夹中的 PDF，可选择递归扫描；
-- 300 DPI 页面渲染、小角度纠偏、去噪和自适应二值化；
+- 300 DPI 页面渲染、小角度纠偏和去噪，默认保留彩色并使用 JPEG 编码；
+- 可对纯文字扫描件显式启用自适应或 Otsu 二值化，生成紧凑的 1-bit 黑白页面；
 - 最多 4 个独立进程并行预处理，并保持原始页序；
 - 可通过 `--language` 使用任意已安装的 Tesseract 语言或语言组合，默认值为简体中文和英文（`chi_sim+eng`）；
 - 生成不可见、可搜索的 OCR 文字层；
+- 默认同时生成经过分页、段落合并和英文断词修复的 Markdown 文本；
 - 成品超过 50 MB 时仅压缩页面图像；
 - 压缩前后逐页核对文字内容，校验失败时保留未压缩版本；
 - 单个文件失败不会中断整批任务。
@@ -31,9 +33,10 @@
 ```mermaid
 flowchart LR
     A[扫描 PDF] --> B[逐页渲染]
-    B --> C[纠偏 / 去噪 / 二值化]
+    B --> C[纠偏 / 去噪 / 可选二值化]
     C --> D[按原页序组装]
     D --> E[OCRmyPDF + Tesseract]
+    E --> M[词坐标与栏间空白分析为 Markdown]
     E --> F{超过大小阈值?}
     F -- 否 --> G[输出可搜索 PDF]
     F -- 是 --> H[仅压缩图像]
@@ -46,10 +49,11 @@ flowchart LR
 
 1. 以 300 DPI 逐页渲染，自动估计并纠正小角度倾斜；
 2. 中值去噪；
-3. 自适应二值化；
+3. 默认保留 RGB 彩色，以 JPEG 品质 72 编码页面；选择 `adaptive` 或 `otsu` 时改为 1-bit 黑白 PNG；
 4. 使用 OCRmyPDF + Tesseract 写入不可见、可搜索的文字层；
-5. OCR 成品超过 50 MB（50,000,000 字节）时，使用 Ghostscript 只对页面图像降采样/压缩；
-6. 比较压缩前后的页数和可提取文字量。校验失败时自动保留未压缩的 OCR 文件。
+5. 对预处理页执行一次结构化 Tesseract OCR，根据词坐标和栏间空白恢复阅读顺序，再生成 Markdown；
+6. OCR 成品超过 50 MB（50,000,000 字节）时，使用 Ghostscript 只对页面图像降采样/压缩；
+7. 比较压缩前后的页数和可提取文字量。校验失败时自动保留未压缩的 OCR 文件。
 
 识别语言可通过 `--language` 配置，支持 Tesseract 中已安装的任意语言数据。默认值为简体中文和英文：`chi_sim+eng`。
 
@@ -133,7 +137,7 @@ python .\batch_ocr.py "D:\Books\待处理" --preprocess-jobs 4
 python .\batch_ocr.py "D:\Books\待处理" --preprocess-jobs 1
 ```
 
-结果默认写入 `D:\Books\待处理\ocr_output`，文件名形如 `书名_ocr.pdf`。输出存在时会跳过；确认需要重做可加 `--overwrite`。
+结果默认写入 `D:\Books\待处理\ocr_output`，每本书同时生成 `书名_ocr.pdf` 和 `书名_ocr.md`。如果 PDF 已存在但 Markdown 缺失，脚本会直接从现有文字层补生成 Markdown；两者均存在时会跳过。确认需要重做可加 `--overwrite`。
 
 指定输出目录并递归处理：
 
@@ -141,7 +145,7 @@ python .\batch_ocr.py "D:\Books\待处理" --preprocess-jobs 1
 python .\batch_ocr.py "D:\Books\待处理" -o "D:\Books\OCR完成" --recursive
 ```
 
-调整阈值和图像压缩参数：
+调整 JPEG 品质、成品阈值和后续图像压缩参数：
 
 ```powershell
 python .\batch_ocr.py "D:\Books\待处理" `
@@ -150,10 +154,16 @@ python .\batch_ocr.py "D:\Books\待处理" `
   --jpeg-quality 72
 ```
 
-有大量照片或插图、不希望二值化时：
+纯文字扫描件需要更小体积和更干净背景时，可启用自适应二值化：
 
 ```powershell
-python .\batch_ocr.py "D:\Books\待处理" --binarization none
+python .\batch_ocr.py "D:\Books\待处理" --binarization adaptive
+```
+
+如只需要可搜索 PDF，可关闭 Markdown 输出：
+
+```powershell
+python .\batch_ocr.py "D:\Books\待处理" --no-markdown
 ```
 
 指定任意已安装的 Tesseract 语言或语言组合，例如繁体中文和英文：
@@ -172,9 +182,9 @@ python .\batch_ocr.py --help
 
 | 场景 | 建议 |
 |---|---|
-| 泛黄、明暗不均的纯文字书 | 默认 `--binarization adaptive` |
+| 含照片、彩图或细腻灰阶插图 | 默认 `--binarization none`，保留彩色并使用 JPEG |
+| 泛黄、明暗不均的纯文字书 | `--binarization adaptive` |
 | 背景较均匀的扫描件 | `--binarization otsu` |
-| 含照片、彩图或细腻灰阶插图 | `--binarization none` |
 | 椒盐噪点 | 默认 `--denoise median` |
 | 轻微连续噪声 | `--denoise nlm --denoise-strength 7` |
 | 小字、古籍批注 | 可保留 `--dpi 300`，不要把压缩 DPI 调得过低 |
@@ -183,9 +193,13 @@ python .\batch_ocr.py --help
 
 ## 注意事项
 
-- 默认二值化会把彩色页转为黑白。含有重要图片时使用 `--binarization none`。
+- 默认 `--binarization none` 会保留 RGB 彩色，并将预处理页面编码为 JPEG；`--jpeg-quality` 同时控制该编码和超阈值后的 JPEG 压缩品质。
+- `--binarization adaptive` 和 `--binarization otsu` 会把页面转为黑白，并以真正的 1-bit PNG 保存，通常更适合纯文字扫描件。
+- Markdown 使用 Tesseract TSV 词坐标和栏间空白检测恢复阅读顺序；规则双栏会先输出完整左栏，再输出右栏，并会保留段落空行、合并段内换行及修复英文行末断词。
+- 为获得词坐标，默认 Markdown 会额外执行一次 Tesseract 结构化识别，因此总处理时间会比仅生成 PDF 更长；可用 `--no-markdown` 关闭。
+- Markdown 是内容结构副本，不会复刻 PDF 的字体和精确坐标；复杂表格、跨栏标题或非常规版式仍可能需要人工调整或专用版面分析模型。
 - 自动纠偏处理的是常见的小角度歪斜；90/180/270 度方向由 OCRmyPDF 的自动旋转处理。
-- `--preprocess-jobs` 控制渲染、纠偏、去噪、二值化和 PNG 编码的并行进程数；`--jobs` 仅控制后续 OCR。
+- `--preprocess-jobs` 控制渲染、纠偏、去噪、可选二值化和 JPEG/PNG 编码的并行进程数；`--jobs` 仅控制后续 OCR。
 - 单个 PDF 失败不会中断同一批次中的其他文件；最后会打印成功、跳过和失败汇总。
 - 使用 `--keep-temp` 可以保留预处理页面和中间 PDF，便于排查特殊版面。
 - `books/`、所有 PDF 和 OCR 中间产物默认被 Git 忽略，避免误上传私人或受版权保护的文档。

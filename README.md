@@ -8,17 +8,19 @@
 
 </div>
 
-PDF Batch OCR processes folders of scanned-book PDFs locally, with configurable Tesseract recognition languages, image preprocessing, controlled parallelism, searchable text layers, and text-safe conditional compression.
+PDF Batch OCR processes folders of scanned-book PDFs locally, with configurable Tesseract recognition languages, image preprocessing, controlled parallelism, searchable text layers, structured Markdown output, and text-safe conditional compression.
 
 No PDF or OCR content is uploaded by this program. Only process documents that you are authorized to use.
 
 ## Features
 
 - Discover PDFs in a folder, with optional recursive scanning.
-- Render pages at 300 DPI, correct small-angle skew, remove noise, and apply adaptive binarization.
+- Render pages at 300 DPI, correct small-angle skew, remove noise, preserve color, and use JPEG encoding by default.
+- Optionally apply adaptive or Otsu binarization to text-only scans, producing compact 1-bit black-and-white pages.
 - Preprocess pages in up to four independent processes while preserving page order.
 - Recognize any installed Tesseract language or language combination through `--language`; the default is Simplified Chinese and English (`chi_sim+eng`).
 - Add an invisible, searchable OCR text layer.
+- Generate Markdown by default with page boundaries, paragraph joining, and English dehyphenation.
 - Compress page images only when the result exceeds 50 MB.
 - Compare page count and extracted text before accepting a compressed result.
 - Continue processing the batch when an individual file fails.
@@ -28,9 +30,10 @@ No PDF or OCR content is uploaded by this program. Only process documents that y
 ```mermaid
 flowchart LR
     A[Discover PDFs] --> B[Render pages]
-    B --> C[Deskew / Denoise / Binarize]
+    B --> C[Deskew / Denoise / Optional binarization]
     C --> D[Reassemble in page order]
     D --> E[OCRmyPDF + Tesseract]
+    E --> M[Word coordinates and gutter analysis to Markdown]
     E --> F{Above size threshold?}
     F -- No --> G[Searchable PDF]
     F -- Yes --> H[Compress images only]
@@ -43,10 +46,11 @@ The default workflow:
 
 1. Renders each page at 300 DPI and corrects small-angle skew.
 2. Applies median denoising.
-3. Applies adaptive binarization.
+3. Preserves RGB color and encodes pages as JPEG at quality 72 by default; selecting `adaptive` or `otsu` produces 1-bit black-and-white PNG pages instead.
 4. Uses OCRmyPDF and Tesseract to add an invisible, searchable text layer.
-5. If the OCR result exceeds 50 MB (50,000,000 bytes), Ghostscript downsamples and compresses page images only.
-6. Compares page counts and extractable text before and after compression. If verification fails, the uncompressed OCR file is kept.
+5. Runs structured Tesseract OCR on the preprocessed pages, then uses word coordinates and column-gutter analysis to restore reading order and generate Markdown.
+6. If the OCR result exceeds 50 MB (50,000,000 bytes), Ghostscript downsamples and compresses page images only.
+7. Compares page counts and extractable text before and after compression. If verification fails, the uncompressed OCR file is kept.
 
 Recognition languages are configurable through `--language` and may use any language data installed in Tesseract. The default is Simplified Chinese and English: `chi_sim+eng`.
 
@@ -128,7 +132,7 @@ Use serial preprocessing when memory is limited:
 python .\batch_ocr.py "D:\Books\ToProcess" --preprocess-jobs 1
 ```
 
-Results are written to `D:\Books\ToProcess\ocr_output` by default, with names such as `book_ocr.pdf`. Existing outputs are skipped; use `--overwrite` to regenerate them.
+Results are written to `D:\Books\ToProcess\ocr_output` by default. Each book produces both `book_ocr.pdf` and `book_ocr.md`. If the PDF already exists but its Markdown file does not, the script creates Markdown from the existing text layer as a best-effort fallback. When both outputs exist, the book is skipped; use `--overwrite` to regenerate them.
 
 Specify an output directory and scan recursively:
 
@@ -136,7 +140,7 @@ Specify an output directory and scan recursively:
 python .\batch_ocr.py "D:\Books\ToProcess" -o "D:\Books\Completed" --recursive
 ```
 
-Adjust the size threshold and image-compression settings:
+Adjust JPEG quality, the size threshold, and later image-compression settings:
 
 ```powershell
 python .\batch_ocr.py "D:\Books\ToProcess" `
@@ -145,10 +149,16 @@ python .\batch_ocr.py "D:\Books\ToProcess" `
   --jpeg-quality 72
 ```
 
-Disable binarization for documents containing many photographs or illustrations:
+For smaller files and cleaner backgrounds in text-only scans, enable adaptive binarization:
 
 ```powershell
-python .\batch_ocr.py "D:\Books\ToProcess" --binarization none
+python .\batch_ocr.py "D:\Books\ToProcess" --binarization adaptive
+```
+
+If you only need a searchable PDF, disable Markdown output:
+
+```powershell
+python .\batch_ocr.py "D:\Books\ToProcess" --no-markdown
 ```
 
 Choose any installed Tesseract language or language combination—for example, Traditional Chinese and English:
@@ -167,9 +177,9 @@ python .\batch_ocr.py --help
 
 | Document type | Recommendation |
 |---|---|
-| Yellowed or uneven text pages | Default `--binarization adaptive` |
+| Photographs, color pages, or detailed grayscale illustrations | Default `--binarization none`; preserve color and use JPEG |
+| Yellowed or uneven text-only pages | `--binarization adaptive` |
 | Scans with a uniform background | `--binarization otsu` |
-| Photographs, color pages, or detailed grayscale illustrations | `--binarization none` |
 | Salt-and-pepper noise | Default `--denoise median` |
 | Light continuous noise | `--denoise nlm --denoise-strength 7` |
 | Small type or annotations in historical books | Keep `--dpi 300`; avoid an excessively low compression DPI |
@@ -178,9 +188,13 @@ The compression stage does not rasterize the whole page. Ghostscript is configur
 
 ## Notes
 
-- Default binarization converts color pages to black and white. Use `--binarization none` when important images are present.
+- Default `--binarization none` preserves RGB color and encodes preprocessed pages as JPEG. `--jpeg-quality` controls both this encoding and JPEG compression applied to results above the size threshold.
+- `--binarization adaptive` and `--binarization otsu` convert pages to black and white and save true 1-bit PNG files, which usually works better for text-only scans.
+- Markdown uses Tesseract TSV word coordinates and column-gutter detection to restore reading order. Regular two-column pages are emitted as the complete left column followed by the right column, while paragraph breaks are retained, wrapped lines are joined, and English end-of-line hyphenation is repaired.
+- Word coordinates require an additional structured Tesseract pass when Markdown is enabled, so total processing takes longer than PDF-only output. Use `--no-markdown` to disable it.
+- Markdown is a content-structure copy, not a reproduction of PDF fonts or exact coordinates. Complex tables, spanning headings, and irregular layouts may still require manual editing or a specialized layout-analysis model.
 - Deskew corrects common small-angle page skew; OCRmyPDF handles 90/180/270-degree orientation with automatic rotation.
-- `--preprocess-jobs` controls parallel rendering, deskewing, denoising, binarization, and PNG encoding. `--jobs` controls the later OCR stage only.
+- `--preprocess-jobs` controls parallel rendering, deskewing, denoising, optional binarization, and JPEG/PNG encoding. `--jobs` controls the later OCR stage only.
 - A failed PDF does not stop other files in the batch. A summary of successful, skipped, and failed files is printed at the end.
 - Use `--keep-temp` to retain preprocessed pages and intermediate PDFs when diagnosing unusual layouts.
 - `books/`, all PDFs, and OCR intermediate files are ignored by Git by default to avoid uploading private or copyrighted documents.

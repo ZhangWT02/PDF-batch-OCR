@@ -2,8 +2,10 @@
 """Batch OCR scanned-book PDFs with preprocessing and image-only compression.
 
 Pipeline for each PDF:
-    render pages -> deskew -> denoise -> binarize -> image-only PDF
-    -> OCRmyPDF/Tesseract -> optional Ghostscript image compression
+    render pages -> deskew -> denoise -> preserve color or binarize
+    -> JPEG or 1-bit PNG -> image-only PDF
+    -> OCRmyPDF/Tesseract -> searchable PDF + structured Markdown
+    -> optional Ghostscript image compression
 
 The optional compression pass is accepted only when the page count is unchanged,
 the OCR text remains extractable, and the resulting file is smaller.
@@ -13,11 +15,14 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import csv
 import importlib.util
+import io
 import logging
 import math
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -60,6 +65,7 @@ class Config:
     compression_dpi: int
     jpeg_quality: int
     output_suffix: str
+    markdown: bool
     keep_temp: bool
 
 
@@ -73,6 +79,22 @@ class Result:
     before_bytes: int = 0
     after_bytes: int = 0
     message: str = ""
+    markdown_output: Path | None = None
+
+
+@dataclass(frozen=True)
+class PositionedWord:
+    text: str
+    x: float
+    y: float
+    font_size: float
+    width: float
+
+
+@dataclass
+class PositionedLine:
+    y: float
+    words: list[PositionedWord]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,19 +133,30 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument(
         "--binarization",
         choices=("adaptive", "otsu", "none"),
-        default="adaptive",
-        help="二值化方式；含大量照片时可用 none",
+        default="none",
+        help="二值化方式；默认 none 保留彩色，adaptive/otsu 输出黑白",
     )
     prep.add_argument("--adaptive-block-size", type=int, default=41, help="自适应二值化邻域（奇数）")
     prep.add_argument("--adaptive-c", type=int, default=15, help="自适应二值化常数，越大背景越白")
 
-    comp = parser.add_argument_group("条件压缩")
+    comp = parser.add_argument_group("图像编码与条件压缩")
     comp.add_argument("--compression-threshold-mb", type=float, default=50.0, help="OCR 成品超过此大小才压缩；0 表示禁用")
     comp.add_argument("--compression-dpi", type=int, default=200, help="压缩时彩色、灰度和单色图像目标 DPI")
-    comp.add_argument("--jpeg-quality", type=int, default=72, help="彩色/灰度图像 JPEG 品质（1-100）")
+    comp.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=72,
+        help="彩色页面及条件压缩中的 JPEG 品质（1-100）",
+    )
 
     misc = parser.add_argument_group("其他")
     misc.add_argument("--output-suffix", default="_ocr", help="输出文件名后缀")
+    misc.add_argument(
+        "--markdown",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="同时生成经过段落整理的 Markdown 文件",
+    )
     misc.add_argument("--keep-temp", action="store_true", help="保留中间文件，便于诊断")
     misc.add_argument("-v", "--verbose", action="store_true", help="显示详细日志")
     return parser
@@ -179,6 +212,7 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         compression_dpi=args.compression_dpi,
         jpeg_quality=args.jpeg_quality,
         output_suffix=args.output_suffix,
+        markdown=args.markdown,
         keep_temp=args.keep_temp,
     )
 
@@ -260,6 +294,10 @@ def output_path_for(source: Path, config: Config) -> Path:
     return parent / f"{source.stem}{config.output_suffix}.pdf"
 
 
+def markdown_path_for(output: Path) -> Path:
+    return output.with_suffix(".md")
+
+
 def weighted_median(values: Sequence[float], weights: Sequence[float]) -> float:
     pairs = sorted(zip(values, weights), key=lambda pair: pair[0])
     midpoint = sum(weights) / 2
@@ -337,18 +375,19 @@ def estimate_skew_angle(gray, max_angle: float) -> float:
     return weighted_median(angles, lengths)
 
 
-def rotate_page(gray, angle: float):
+def rotate_page(image, angle: float):
     import cv2
 
-    height, width = gray.shape[:2]
+    height, width = image.shape[:2]
     matrix = cv2.getRotationMatrix2D((width / 2.0, height / 2.0), angle, 1.0)
+    border_value = (255, 255, 255) if image.ndim == 3 else 255
     return cv2.warpAffine(
-        gray,
+        image,
         matrix,
         (width, height),
         flags=cv2.INTER_CUBIC,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=255,
+        borderValue=border_value,
     )
 
 
@@ -357,12 +396,29 @@ def preprocess_page(rgb, config: Config):
 
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
     angle = estimate_skew_angle(gray, config.deskew_max_angle)
-    if config.deskew_min_angle <= abs(angle) <= config.deskew_max_angle:
+    should_rotate = config.deskew_min_angle <= abs(angle) <= config.deskew_max_angle
+    if not should_rotate:
+        angle = 0.0
+
+    if config.binarization == "none":
+        processed = rotate_page(rgb, angle) if should_rotate else rgb
+        if config.denoise == "median":
+            processed = cv2.medianBlur(processed, 3)
+        elif config.denoise == "nlm":
+            processed = cv2.fastNlMeansDenoisingColored(
+                processed,
+                None,
+                h=config.denoise_strength,
+                hColor=config.denoise_strength,
+                templateWindowSize=7,
+                searchWindowSize=21,
+            )
+        return processed, angle
+
+    if should_rotate:
         # Image y coordinates point downward: a +2 degree detected slope is
         # visually clockwise and needs a +2 degree OpenCV (CCW) rotation.
         gray = rotate_page(gray, angle)
-    else:
-        angle = 0.0
 
     if config.denoise == "median":
         gray = cv2.medianBlur(gray, 3)
@@ -386,25 +442,31 @@ def preprocess_page(rgb, config: Config):
         )
     elif config.binarization == "otsu":
         _, processed = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    else:
-        processed = gray
     return processed, angle
 
 
-def write_png(path: Path, image, bilevel: bool) -> None:
-    import cv2
+def page_image_suffix(config: Config) -> str:
+    return ".jpg" if config.binarization == "none" else ".png"
+
+
+def write_page_image(path: Path, image, bilevel: bool, jpeg_quality: int) -> None:
     from PIL import Image
 
+    pil_image = Image.fromarray(image)
     if bilevel:
         # OpenCV's threshold result is still an 8-bit image. Converting it to
         # a true 1-bit PNG allows img2pdf to use compact bilevel storage.
-        Image.fromarray(image).convert("1").save(path, format="PNG", optimize=True)
+        pil_image.convert("1").save(path, format="PNG", optimize=True)
         return
 
-    success, encoded = cv2.imencode(".png", image, [cv2.IMWRITE_PNG_COMPRESSION, 9])
-    if not success:
-        raise ProcessingError(f"无法编码页面图像：{path}")
-    encoded.tofile(str(path))
+    # PIL receives RGB data from PDFium, so saving through it avoids the
+    # red/blue channel swap that OpenCV's BGR-oriented JPEG encoder would cause.
+    pil_image.convert("RGB").save(
+        path,
+        format="JPEG",
+        quality=jpeg_quality,
+        optimize=True,
+    )
 
 
 def render_and_preprocess_page(document, index: int, pages_dir: Path, config: Config) -> tuple[int, Path, float]:
@@ -417,8 +479,13 @@ def render_and_preprocess_page(document, index: int, pages_dir: Path, config: Co
         bitmap = page.render(scale=config.dpi / 72.0)
         rgb = np.asarray(bitmap.to_pil().convert("RGB"))
         processed, angle = preprocess_page(rgb, config)
-        image_path = pages_dir / f"page-{index + 1:06d}.png"
-        write_png(image_path, processed, config.binarization != "none")
+        image_path = pages_dir / f"page-{index + 1:06d}{page_image_suffix(config)}"
+        write_page_image(
+            image_path,
+            processed,
+            config.binarization != "none",
+            config.jpeg_quality,
+        )
         return index, image_path, angle
     finally:
         if bitmap is not None:
@@ -535,7 +602,7 @@ def build_preprocessed_pdf(source: Path, destination: Path, pages_dir: Path, con
     return page_count
 
 
-def run_ocr(source: Path, destination: Path, config: Config) -> None:
+def run_ocr(source: Path, destination: Path, config: Config, sidecar: Path | None = None) -> None:
     command = [
         sys.executable,
         "-m",
@@ -551,11 +618,361 @@ def run_ocr(source: Path, destination: Path, config: Config) -> None:
     ]
     if config.auto_rotate:
         command.append("--rotate-pages")
+    if sidecar is not None:
+        command.extend(("--sidecar", str(sidecar)))
     command.extend((str(source), str(destination)))
     LOG.info("    运行 OCR（语言：%s）", config.language)
     completed = subprocess.run(command, check=False)
     if completed.returncode != 0 or not destination.is_file():
         raise ProcessingError(f"OCRmyPDF 执行失败（退出码 {completed.returncode}）")
+
+
+def is_cjk_character(character: str) -> bool:
+    if not character:
+        return False
+    codepoint = ord(character)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x3040 <= codepoint <= 0x30FF
+        or 0xAC00 <= codepoint <= 0xD7AF
+    )
+
+
+def is_markdown_list_item(line: str) -> bool:
+    if line.startswith(("- ", "* ", "+ ")):
+        return True
+    first, separator, _rest = line.partition(" ")
+    return bool(separator and len(first) > 1 and first[:-1].isdigit() and first[-1] in ".)")
+
+
+def join_wrapped_lines(lines: Sequence[str]) -> str:
+    if not lines:
+        return ""
+    if all(is_markdown_list_item(line) for line in lines):
+        return "\n".join(lines)
+
+    paragraph = lines[0]
+    for line in lines[1:]:
+        if paragraph.endswith("-") and line[:1].isascii() and line[:1].islower():
+            paragraph = paragraph[:-1] + line
+        elif is_cjk_character(paragraph[-1:]) or is_cjk_character(line[:1]):
+            paragraph += line
+        else:
+            paragraph += " " + line
+    return paragraph
+
+
+def normalize_page_text(page_text: str) -> str:
+    blocks: list[str] = []
+    current: list[str] = []
+    normalized = page_text.replace("\r\n", "\n").replace("\r", "\n")
+    for raw_line in normalized.split("\n"):
+        line = raw_line.strip()
+        if line:
+            current.append(line)
+        elif current:
+            blocks.append(join_wrapped_lines(current))
+            current = []
+    if current:
+        blocks.append(join_wrapped_lines(current))
+    return "\n\n".join(block for block in blocks if block)
+
+
+def markdown_from_pages(title: str, pages: Sequence[str]) -> str:
+    safe_title = " ".join(title.splitlines()).replace("#", "\\#")
+    sections = [f"# {safe_title}"]
+    for page_number, page_text in enumerate(pages, start=1):
+        section = f"<!-- page: {page_number} -->"
+        normalized = normalize_page_text(page_text)
+        if normalized:
+            section += f"\n\n{normalized}"
+        sections.append(section)
+    return "\n\n".join(sections).rstrip() + "\n"
+
+
+def markdown_from_sidecar(title: str, sidecar: Path, page_count: int) -> str:
+    text = sidecar.read_text(encoding="utf-8", errors="replace")
+    pages = text.replace("\r\n", "\n").replace("\r", "\n").split("\f")
+    if len(pages) < page_count:
+        pages.extend([""] * (page_count - len(pages)))
+    elif len(pages) > page_count:
+        pages = pages[: page_count - 1] + ["\n".join(pages[page_count - 1 :])]
+    return markdown_from_pages(title, pages)
+
+
+def estimate_text_width(text: str, font_size: float) -> float:
+    units = sum(1.0 if is_cjk_character(character) else 0.55 for character in text)
+    return max(font_size * 0.5, units * font_size)
+
+
+def group_positioned_lines(words: Sequence[PositionedWord]) -> list[PositionedLine]:
+    lines: list[PositionedLine] = []
+    for word in sorted(words, key=lambda item: (-item.y, item.x)):
+        best_line = None
+        best_distance = math.inf
+        for line in lines:
+            distance = abs(line.y - word.y)
+            line_font_size = statistics.median(item.font_size for item in line.words)
+            if distance <= max(1.0, min(line_font_size, word.font_size) * 0.4) and distance < best_distance:
+                best_line = line
+                best_distance = distance
+        if best_line is None:
+            lines.append(PositionedLine(word.y, [word]))
+        else:
+            best_line.words.append(word)
+            best_line.y = sum(item.y for item in best_line.words) / len(best_line.words)
+    for line in lines:
+        line.words.sort(key=lambda item: item.x)
+    return sorted(lines, key=lambda item: -item.y)
+
+
+def find_column_gutter(lines: Sequence[PositionedLine], page_width: float) -> tuple[float, float] | None:
+    words = [word for line in lines for word in line.words]
+    width = max(1, int(math.ceil(page_width)))
+    if len(words) < 8 or width < 100:
+        return None
+
+    difference = [0] * (width + 2)
+    for word in words:
+        start = max(0, min(width, int(math.floor(word.x))))
+        end = max(start + 1, min(width + 1, int(math.ceil(word.x + word.width))))
+        difference[start] += 1
+        difference[end] -= 1
+    coverage: list[int] = []
+    active = 0
+    for delta in difference[: width + 1]:
+        active += delta
+        coverage.append(active)
+
+    search_start = int(width * 0.2)
+    search_end = int(width * 0.8)
+    maximum_coverage = max(coverage[search_start:search_end], default=0)
+    threshold = max(1, min(maximum_coverage // 5, len(lines) // 10))
+    minimum_width = max(8, int(width * 0.025))
+    candidates: list[tuple[int, int, int]] = []
+    run_start = None
+    for position in range(search_start, search_end + 1):
+        if coverage[position] <= threshold:
+            if run_start is None:
+                run_start = position
+        elif run_start is not None:
+            if position - run_start >= minimum_width:
+                candidates.append((run_start, position, position - run_start))
+            run_start = None
+    if run_start is not None and search_end + 1 - run_start >= minimum_width:
+        candidates.append((run_start, search_end + 1, search_end + 1 - run_start))
+
+    ranked: list[tuple[int, int, float, int, int]] = []
+    minimum_side_words = max(3, int(len(words) * 0.08))
+    for start, end, span in candidates:
+        midpoint = (start + end) / 2
+        left_words = sum(word.x + word.width / 2 < midpoint for word in words)
+        right_words = sum(word.x + word.width / 2 > midpoint for word in words)
+        if left_words < minimum_side_words or right_words < minimum_side_words:
+            continue
+        paired_lines = sum(
+            any(word.x + word.width / 2 < midpoint for word in line.words)
+            and any(word.x + word.width / 2 > midpoint for word in line.words)
+            for line in lines
+        )
+        ranked.append((paired_lines, span, -abs(midpoint - page_width / 2), start, end))
+    if not ranked:
+        return None
+    _paired, _span, _distance, start, end = max(ranked)
+    return float(start), float(end)
+
+
+def positioned_line_text(words: Sequence[PositionedWord]) -> str:
+    text = ""
+    for word in sorted(words, key=lambda item: item.x):
+        if not text:
+            text = word.text
+        elif is_cjk_character(text[-1:]) or is_cjk_character(word.text[:1]):
+            text += word.text
+        else:
+            text += " " + word.text
+    return text
+
+
+def format_positioned_lines(lines: Sequence[PositionedLine]) -> str:
+    populated = [line for line in lines if line.words]
+    if not populated:
+        return ""
+    populated.sort(key=lambda item: -item.y)
+    gaps = [populated[index].y - populated[index + 1].y for index in range(len(populated) - 1)]
+    positive_gaps = [gap for gap in gaps if gap > 0.5]
+    normal_gap = statistics.median(positive_gaps) if positive_gaps else 0.0
+    baseline_x = min(word.x for line in populated for word in line.words)
+
+    paragraphs: list[str] = []
+    current: list[str] = []
+    previous_line = None
+    for line in populated:
+        line_text = positioned_line_text(line.words)
+        line_x = min(word.x for word in line.words)
+        line_font_size = statistics.median(word.font_size for word in line.words)
+        new_paragraph = False
+        if previous_line is not None:
+            vertical_gap = previous_line.y - line.y
+            if normal_gap and vertical_gap > max(normal_gap * 1.45, line_font_size * 1.7):
+                new_paragraph = True
+            elif line_x > baseline_x + line_font_size * 1.4:
+                new_paragraph = True
+            elif is_markdown_list_item(line_text):
+                new_paragraph = bool(current and not all(is_markdown_list_item(item) for item in current))
+        if new_paragraph and current:
+            paragraphs.append(join_wrapped_lines(current))
+            current = []
+        current.append(line_text)
+        previous_line = line
+    if current:
+        paragraphs.append(join_wrapped_lines(current))
+    return "\n\n".join(paragraphs)
+
+
+def positioned_words_to_text(words: Sequence[PositionedWord], page_width: float) -> str:
+    lines = group_positioned_lines(words)
+    gutter = find_column_gutter(lines, page_width)
+    if gutter is None:
+        return format_positioned_lines(lines)
+
+    gutter_start, gutter_end = gutter
+    midpoint = (gutter_start + gutter_end) / 2
+    sections: list[str] = []
+    column_lines: list[PositionedLine] = []
+
+    def flush_columns() -> None:
+        if not column_lines:
+            return
+        left = [
+            PositionedLine(line.y, [word for word in line.words if word.x + word.width / 2 < midpoint])
+            for line in column_lines
+        ]
+        right = [
+            PositionedLine(line.y, [word for word in line.words if word.x + word.width / 2 >= midpoint])
+            for line in column_lines
+        ]
+        for column in (left, right):
+            formatted = format_positioned_lines(column)
+            if formatted:
+                sections.append(formatted)
+        column_lines.clear()
+
+    for line in lines:
+        crosses_gutter = any(word.x < midpoint < word.x + word.width for word in line.words)
+        if crosses_gutter:
+            flush_columns()
+            sections.append(format_positioned_lines([line]))
+        else:
+            column_lines.append(line)
+    flush_columns()
+    return "\n\n".join(section for section in sections if section)
+
+
+def positioned_text_from_pdf_page(page) -> str:
+    words: list[PositionedWord] = []
+
+    def collect(text, current_matrix, text_matrix, _font, font_size) -> None:
+        cleaned = " ".join(text.split())
+        if not cleaned:
+            return
+        x = text_matrix[4] * current_matrix[0] + text_matrix[5] * current_matrix[2] + current_matrix[4]
+        y = text_matrix[4] * current_matrix[1] + text_matrix[5] * current_matrix[3] + current_matrix[5]
+        size = max(1.0, abs(float(font_size)))
+        words.append(PositionedWord(cleaned, float(x), float(y), size, estimate_text_width(cleaned, size)))
+
+    plain_text = page.extract_text(visitor_text=collect) or ""
+    if not words:
+        return plain_text
+    return positioned_words_to_text(words, float(page.mediabox.width))
+
+
+def positioned_words_from_tsv(tsv: str) -> tuple[list[PositionedWord], float]:
+    words: list[PositionedWord] = []
+    page_width = 0.0
+    for row in csv.DictReader(io.StringIO(tsv), delimiter="\t"):
+        try:
+            level = int(row.get("level", "0"))
+            width = float(row.get("width", "0"))
+            if level == 1:
+                page_width = max(page_width, width)
+            if level != 5:
+                continue
+            text = " ".join((row.get("text") or "").split())
+            if not text:
+                continue
+            left = float(row.get("left", "0"))
+            top = float(row.get("top", "0"))
+            height = max(1.0, float(row.get("height", "0")))
+            words.append(PositionedWord(text, left, -top, height, max(1.0, width)))
+        except (TypeError, ValueError):
+            continue
+    if page_width <= 0 and words:
+        page_width = max(word.x + word.width for word in words)
+    return words, page_width
+
+
+def markdown_from_page_images(title: str, pages_dir: Path, page_count: int, config: Config) -> str:
+    tesseract = find_tesseract()
+    if not tesseract:
+        raise ProcessingError("无法生成 Markdown：未找到 Tesseract")
+    image_paths = sorted(pages_dir.glob("page-*"))
+    if len(image_paths) != page_count:
+        raise ProcessingError(f"Markdown 页面图像数量不一致（{len(image_paths)} != {page_count}）")
+
+    pages: list[str] = []
+    total_words = 0
+    for page_number, image_path in enumerate(image_paths, start=1):
+        command = [
+            tesseract,
+            str(image_path),
+            "stdout",
+            "-l",
+            config.language,
+            "--psm",
+            "3",
+            "tsv",
+        ]
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if completed.returncode != 0:
+            diagnostic = (completed.stderr or completed.stdout or "").strip().splitlines()
+            detail = diagnostic[-1] if diagnostic else f"退出码 {completed.returncode}"
+            raise ProcessingError(f"第 {page_number} 页结构化 OCR 失败：{detail}")
+        words, page_width = positioned_words_from_tsv(completed.stdout)
+        total_words += len(words)
+        pages.append(positioned_words_to_text(words, page_width) if words else "")
+    if total_words == 0:
+        raise ProcessingError("结构化 OCR 未识别到文字")
+    return markdown_from_pages(title, pages)
+
+
+def markdown_from_pdf(title: str, source: Path) -> str:
+    from pypdf import PdfReader
+
+    reader = PdfReader(str(source), strict=False)
+    pages = [positioned_text_from_pdf_page(page) for page in reader.pages]
+    return markdown_from_pages(title, pages)
+
+
+def write_markdown(destination: Path, content: str) -> None:
+    staging = destination.with_name(f".{destination.name}.partial")
+    if staging.exists():
+        staging.unlink()
+    try:
+        staging.write_text(content, encoding="utf-8", newline="\n")
+        os.replace(staging, destination)
+    finally:
+        if staging.exists():
+            staging.unlink()
 
 
 def find_tesseract() -> str | None:
@@ -701,8 +1118,36 @@ def safe_temp_directory(source: Path, keep: bool) -> tuple[Path, tempfile.Tempor
 
 def process_one(source: Path, output: Path, config: Config) -> Result:
     started = time.monotonic()
+    markdown_output = markdown_path_for(output)
     if output.exists() and not config.overwrite:
-        return Result(source, output, "skipped", 0.0, message="输出已存在")
+        if config.markdown and not markdown_output.exists():
+            try:
+                content = markdown_from_pdf(source.stem, output)
+                write_markdown(markdown_output, content)
+                return Result(
+                    source,
+                    output,
+                    "ok",
+                    time.monotonic() - started,
+                    message="PDF 已存在；已从文字层补生成 Markdown",
+                    markdown_output=markdown_output,
+                )
+            except Exception as exc:
+                return Result(
+                    source,
+                    output,
+                    "skipped",
+                    time.monotonic() - started,
+                    message=f"输出已存在，但无法补生成 Markdown：{exc}",
+                )
+        return Result(
+            source,
+            output,
+            "skipped",
+            0.0,
+            message="输出已存在",
+            markdown_output=markdown_output if markdown_output.exists() else None,
+        )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temp_dir, temp_manager = safe_temp_directory(output, config.keep_temp)
@@ -710,25 +1155,43 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
     pages_dir.mkdir()
     preprocessed = temp_dir / "preprocessed.pdf"
     ocr_result = temp_dir / "ocr.pdf"
+    sidecar = temp_dir / "ocr.txt" if config.markdown else None
     compressed_result = temp_dir / "compressed.pdf"
     compressed = False
-    warning = ""
+    warnings: list[str] = []
     before_bytes = 0
     after_bytes = 0
+    markdown_content: str | None = None
     try:
         LOG.info("处理：%s", source)
         page_count = build_preprocessed_pdf(source, preprocessed, pages_dir, config)
         LOG.info("    已生成 %d 页预处理 PDF", page_count)
-        run_ocr(preprocessed, ocr_result, config)
+        run_ocr(preprocessed, ocr_result, config, sidecar=sidecar)
         ocr_pages, ocr_text = pdf_text_signature(ocr_result)
         if ocr_pages != page_count:
             raise ProcessingError(f"OCR 后页数变化（{page_count} -> {ocr_pages}）")
         recognized_chars = sum(map(len, ocr_text))
         if recognized_chars == 0:
-            warning = "OCR 完成，但未提取到任何文字；请检查语言包和页面质量"
-            LOG.warning("    %s", warning)
+            notice = "OCR 完成，但未提取到任何文字；请检查语言包和页面质量"
+            warnings.append(notice)
+            LOG.warning("    %s", notice)
         else:
             LOG.info("    OCR 校验通过：%d 页，%d 个非空白字符", ocr_pages, recognized_chars)
+        if sidecar is not None:
+            try:
+                markdown_content = markdown_from_page_images(source.stem, pages_dir, page_count, config)
+            except Exception as exc:
+                try:
+                    if not sidecar.is_file():
+                        raise ProcessingError("OCRmyPDF 未生成文字 sidecar")
+                    markdown_content = markdown_from_sidecar(source.stem, sidecar, page_count)
+                    notice = f"结构化 Markdown 解析失败，已回退到纯文本 sidecar：{exc}"
+                    warnings.append(notice)
+                    LOG.warning("    %s", notice)
+                except Exception as fallback_exc:
+                    notice = f"Markdown 生成失败：{fallback_exc}"
+                    warnings.append(notice)
+                    LOG.warning("    %s", notice)
         before_bytes = ocr_result.stat().st_size
         selected = ocr_result
 
@@ -742,26 +1205,39 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
                     compressed = True
                     LOG.info("    压缩校验通过：%s", detail)
                 else:
-                    warning = f"压缩校验未通过：{detail}；已保留原 OCR 文件"
-                    LOG.warning("    %s", warning)
+                    notice = f"压缩校验未通过：{detail}；已保留原 OCR 文件"
+                    warnings.append(notice)
+                    LOG.warning("    %s", notice)
             except ProcessingError as exc:
                 # OCR succeeded, so a missing/failed optional compressor should not
                 # discard the useful searchable PDF.
-                warning = f"压缩未完成：{exc}；已保留原 OCR 文件"
-                LOG.warning("    %s", warning)
+                notice = f"压缩未完成：{exc}；已保留原 OCR 文件"
+                warnings.append(notice)
+                LOG.warning("    %s", notice)
 
         after_bytes = selected.stat().st_size
         if compressed and after_bytes > threshold_bytes:
-            warning = (
+            notice = (
                 f"压缩后仍为 {format_mb(after_bytes)}，高于阈值；"
                 "可降低 --compression-dpi 或 --jpeg-quality"
             )
-            LOG.warning("    %s", warning)
+            warnings.append(notice)
+            LOG.warning("    %s", notice)
         staging = output.with_name(f".{output.name}.partial")
         if staging.exists():
             staging.unlink()
         shutil.copyfile(selected, staging)
         os.replace(staging, output)
+        written_markdown = None
+        if markdown_content is not None:
+            try:
+                write_markdown(markdown_output, markdown_content)
+                written_markdown = markdown_output
+                LOG.info("    已生成 Markdown：%s", markdown_output)
+            except Exception as exc:
+                notice = f"Markdown 写入失败：{exc}"
+                warnings.append(notice)
+                LOG.warning("    %s", notice)
         return Result(
             source=source,
             output=output,
@@ -770,7 +1246,8 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
             compressed=compressed,
             before_bytes=before_bytes,
             after_bytes=after_bytes,
-            message=warning,
+            message="；".join(warnings),
+            markdown_output=written_markdown,
         )
     except Exception as exc:
         return Result(
@@ -804,9 +1281,10 @@ def print_summary(results: Sequence[Result]) -> None:
             compression = ""
             if result.compressed:
                 compression = f"，已压缩 {format_mb(result.before_bytes)} -> {format_mb(result.after_bytes)}"
+            markdown = f"，Markdown：{result.markdown_output}" if result.markdown_output else ""
             label = "成功/警告" if result.message else "成功"
             warning = f"；{result.message}" if result.message else ""
-            print(f"  [{label}] {result.source.name} -> {result.output}{compression}{warning}")
+            print(f"  [{label}] {result.source.name} -> {result.output}{markdown}{compression}{warning}")
         elif result.status == "skipped":
             print(f"  [跳过] {result.source.name}：{result.message}")
         else:
