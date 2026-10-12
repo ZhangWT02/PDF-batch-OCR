@@ -166,6 +166,12 @@ python .\batch_ocr.py "D:\Books\待处理" --binarization adaptive
 python .\batch_ocr.py "D:\Books\待处理" --no-markdown
 ```
 
+如只需要 Markdown，可跳过可搜索 PDF 的生成及条件压缩：
+
+```powershell
+python .\batch_ocr.py "D:\Books\待处理" --markdown-only
+```
+
 指定任意已安装的 Tesseract 语言或语言组合，例如繁体中文和英文：
 
 ```powershell
@@ -197,6 +203,7 @@ python .\batch_ocr.py --help
 - `--binarization adaptive` 和 `--binarization otsu` 会把页面转为黑白，并以真正的 1-bit PNG 保存，通常更适合纯文字扫描件。
 - Markdown 使用 Tesseract TSV 词坐标和栏间空白检测恢复阅读顺序；规则双栏会先输出完整左栏，再输出右栏，并会保留段落空行、合并段内换行及修复英文行末断词。
 - 为获得词坐标，默认 Markdown 会额外执行一次 Tesseract 结构化识别，因此总处理时间会比仅生成 PDF 更长；可用 `--no-markdown` 关闭。
+- `--markdown-only` 会直接执行页面预处理和结构化 Tesseract 识别，但跳过 OCRmyPDF、PDF 组装及 Ghostscript 压缩；不能与 `--no-markdown` 同时使用。
 - Markdown 是内容结构副本，不会复刻 PDF 的字体和精确坐标；复杂表格、跨栏标题或非常规版式仍可能需要人工调整或专用版面分析模型。
 - 自动纠偏处理的是常见的小角度歪斜；90/180/270 度方向由 OCRmyPDF 的自动旋转处理。
 - `--preprocess-jobs` 控制渲染、纠偏、去噪、可选二值化和 JPEG/PNG 编码的并行进程数；`--jobs` 仅控制后续 OCR。

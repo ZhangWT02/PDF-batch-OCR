@@ -4,6 +4,7 @@
 Pipeline for each PDF:
     render pages -> deskew -> denoise -> preserve color or binarize
     -> JPEG or 1-bit PNG -> image-only PDF
+    -> structured Markdown only, or
     -> OCRmyPDF/Tesseract -> searchable PDF + structured Markdown
     -> optional Ghostscript image compression
 
@@ -66,6 +67,7 @@ class Config:
     jpeg_quality: int
     output_suffix: str
     markdown: bool
+    markdown_only: bool
     keep_temp: bool
 
 
@@ -157,6 +159,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=True,
         help="同时生成经过段落整理的 Markdown 文件",
     )
+    misc.add_argument(
+        "--markdown-only",
+        action="store_true",
+        help="只生成 Markdown；跳过 OCR PDF 与条件压缩",
+    )
     misc.add_argument("--keep-temp", action="store_true", help="保留中间文件，便于诊断")
     misc.add_argument("-v", "--verbose", action="store_true", help="显示详细日志")
     return parser
@@ -190,6 +197,8 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         parser.error("--language 不能为空")
     if not args.output_suffix or any(c in args.output_suffix for c in '<>:"/\\|?*'):
         parser.error("--output-suffix 为空或包含文件名非法字符")
+    if args.markdown_only and not args.markdown:
+        parser.error("--markdown-only 不能与 --no-markdown 同时使用")
 
     return Config(
         input_dir=input_dir,
@@ -213,25 +222,31 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         jpeg_quality=args.jpeg_quality,
         output_suffix=args.output_suffix,
         markdown=args.markdown,
+        markdown_only=args.markdown_only,
         keep_temp=args.keep_temp,
     )
 
 
-def missing_python_packages() -> list[str]:
+def missing_python_packages(markdown_only: bool = False) -> list[str]:
     modules = {
         "cv2": "opencv-python-headless",
-        "img2pdf": "img2pdf",
         "numpy": "numpy",
         "PIL": "Pillow",
-        "pypdf": "pypdf",
         "pypdfium2": "pypdfium2",
-        "ocrmypdf": "ocrmypdf",
     }
+    if not markdown_only:
+        modules.update(
+            {
+                "img2pdf": "img2pdf",
+                "pypdf": "pypdf",
+                "ocrmypdf": "ocrmypdf",
+            }
+        )
     return [package for module, package in modules.items() if importlib.util.find_spec(module) is None]
 
 
 def preflight(config: Config) -> None:
-    missing = missing_python_packages()
+    missing = missing_python_packages(config.markdown_only)
     if missing:
         packages = " ".join(missing)
         raise ProcessingError(
@@ -540,8 +555,12 @@ def log_preprocessed_page(index: int, page_count: int, angle: float) -> None:
     )
 
 
-def build_preprocessed_pdf(source: Path, destination: Path, pages_dir: Path, config: Config) -> int:
-    import img2pdf
+def build_preprocessed_pdf(
+    source: Path,
+    destination: Path | None,
+    pages_dir: Path,
+    config: Config,
+) -> int:
     import pypdfium2 as pdfium
 
     try:
@@ -590,15 +609,18 @@ def build_preprocessed_pdf(source: Path, destination: Path, pages_dir: Path, con
         raise ProcessingError("预处理完成后发现页面图像缺失")
 
     ordered_paths = [path for path in image_paths if path is not None]
-    try:
-        with destination.open("wb") as stream:
-            img2pdf.convert(
-                [str(path) for path in ordered_paths],
-                outputstream=stream,
-                layout_fun=img2pdf.get_fixed_dpi_layout_fun((config.dpi, config.dpi)),
-            )
-    except Exception as exc:
-        raise ProcessingError(f"无法组装预处理 PDF：{exc}") from exc
+    if destination is not None:
+        import img2pdf
+
+        try:
+            with destination.open("wb") as stream:
+                img2pdf.convert(
+                    [str(path) for path in ordered_paths],
+                    outputstream=stream,
+                    layout_fun=img2pdf.get_fixed_dpi_layout_fun((config.dpi, config.dpi)),
+                )
+        except Exception as exc:
+            raise ProcessingError(f"无法组装预处理 PDF：{exc}") from exc
     return page_count
 
 
@@ -1119,7 +1141,16 @@ def safe_temp_directory(source: Path, keep: bool) -> tuple[Path, tempfile.Tempor
 def process_one(source: Path, output: Path, config: Config) -> Result:
     started = time.monotonic()
     markdown_output = markdown_path_for(output)
-    if output.exists() and not config.overwrite:
+    if config.markdown_only and markdown_output.exists() and not config.overwrite:
+        return Result(
+            source,
+            None,
+            "skipped",
+            0.0,
+            message="Markdown 输出已存在",
+            markdown_output=markdown_output,
+        )
+    if not config.markdown_only and output.exists() and not config.overwrite:
         if config.markdown and not markdown_output.exists():
             try:
                 content = markdown_from_pdf(source.stem, output)
@@ -1164,7 +1195,21 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
     markdown_content: str | None = None
     try:
         LOG.info("处理：%s", source)
-        page_count = build_preprocessed_pdf(source, preprocessed, pages_dir, config)
+        preprocessed_destination = None if config.markdown_only else preprocessed
+        page_count = build_preprocessed_pdf(source, preprocessed_destination, pages_dir, config)
+        if config.markdown_only:
+            LOG.info("    已生成 %d 页预处理图像", page_count)
+            markdown_content = markdown_from_page_images(source.stem, pages_dir, page_count, config)
+            write_markdown(markdown_output, markdown_content)
+            LOG.info("    已生成 Markdown：%s", markdown_output)
+            return Result(
+                source=source,
+                output=None,
+                status="ok",
+                elapsed_seconds=time.monotonic() - started,
+                markdown_output=markdown_output,
+            )
+
         LOG.info("    已生成 %d 页预处理 PDF", page_count)
         run_ocr(preprocessed, ocr_result, config, sidecar=sidecar)
         ocr_pages, ocr_text = pdf_text_signature(ocr_result)
@@ -1281,10 +1326,14 @@ def print_summary(results: Sequence[Result]) -> None:
             compression = ""
             if result.compressed:
                 compression = f"，已压缩 {format_mb(result.before_bytes)} -> {format_mb(result.after_bytes)}"
-            markdown = f"，Markdown：{result.markdown_output}" if result.markdown_output else ""
             label = "成功/警告" if result.message else "成功"
             warning = f"；{result.message}" if result.message else ""
-            print(f"  [{label}] {result.source.name} -> {result.output}{markdown}{compression}{warning}")
+            outputs = []
+            if result.output is not None:
+                outputs.append(str(result.output))
+            if result.markdown_output is not None:
+                outputs.append(str(result.markdown_output))
+            print(f"  [{label}] {result.source.name} -> {', '.join(outputs)}{compression}{warning}")
         elif result.status == "skipped":
             print(f"  [跳过] {result.source.name}：{result.message}")
         else:

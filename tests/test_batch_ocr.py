@@ -32,6 +32,7 @@ def make_config(root: Path, **overrides) -> batch_ocr.Config:
         jpeg_quality=72,
         output_suffix="_ocr",
         markdown=True,
+        markdown_only=False,
         keep_temp=False,
     )
     values.update(overrides)
@@ -46,6 +47,7 @@ class BatchOcrTests(unittest.TestCase):
         self.assertEqual(args.binarization, "none")
         self.assertEqual(args.jpeg_quality, 72)
         self.assertTrue(args.markdown)
+        self.assertFalse(args.markdown_only)
         self.assertEqual(args.denoise, "median")
         self.assertEqual(args.preprocess_jobs, min(4, batch_ocr.os.cpu_count() or 1))
 
@@ -254,6 +256,64 @@ class BatchOcrTests(unittest.TestCase):
             self.assertEqual(result.markdown_output.read_text(encoding="utf-8"), "# book\n\n正文\n")
             extractor.assert_called_once_with("book", output)
             ocr.assert_not_called()
+
+    def test_markdown_only_skips_pdf_ocr_and_writes_only_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "book.pdf"
+            source.write_bytes(b"source")
+            output = root / "ocr_output" / "book_ocr.pdf"
+            config = make_config(root, markdown_only=True)
+
+            def fake_build(_source, destination, _pages_dir, _config):
+                self.assertIsNone(destination)
+                return 1
+
+            with (
+                patch.object(batch_ocr, "build_preprocessed_pdf", side_effect=fake_build),
+                patch.object(batch_ocr, "markdown_from_page_images", return_value="# book\n\n正文\n"),
+                patch.object(batch_ocr, "run_ocr") as ocr,
+                patch.object(batch_ocr, "compress_images_only") as compressor,
+            ):
+                result = batch_ocr.process_one(source, output, config)
+
+            self.assertEqual(result.status, "ok")
+            self.assertIsNone(result.output)
+            self.assertFalse(output.exists())
+            self.assertEqual(result.markdown_output, output.with_suffix(".md"))
+            self.assertEqual(result.markdown_output.read_text(encoding="utf-8"), "# book\n\n正文\n")
+            ocr.assert_not_called()
+            compressor.assert_not_called()
+
+    def test_markdown_only_ignores_an_existing_pdf_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "book.pdf"
+            source.write_bytes(b"source")
+            output = root / "ocr_output" / "book_ocr.pdf"
+            output.parent.mkdir()
+            output.write_bytes(b"existing PDF")
+            config = make_config(root, markdown_only=True)
+
+            with (
+                patch.object(batch_ocr, "build_preprocessed_pdf", return_value=1) as build,
+                patch.object(batch_ocr, "markdown_from_page_images", return_value="# book\n\n新识别正文\n"),
+                patch.object(batch_ocr, "markdown_from_pdf") as existing_pdf_extractor,
+            ):
+                result = batch_ocr.process_one(source, output, config)
+
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(output.read_bytes(), b"existing PDF")
+            self.assertIn("新识别正文", result.markdown_output.read_text(encoding="utf-8"))
+            build.assert_called_once()
+            existing_pdf_extractor.assert_not_called()
+
+    def test_markdown_only_rejects_no_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parser = batch_ocr.build_parser()
+            args = parser.parse_args([directory, "--markdown-only", "--no-markdown"])
+            with self.assertRaises(SystemExit):
+                batch_ocr.validate_args(args, parser)
 
     def test_compression_uses_valid_ghostscript_filter_values(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

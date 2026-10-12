@@ -11,6 +11,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Generate a Markdown file alongside each searchable PDF by default, using Tesseract word coordinates and column-gutter detection with page markers, paragraph joining, and English dehyphenation.
 - Backfill a missing Markdown file from an existing OCR PDF without rerunning OCR.
+- Add `--markdown-only` to generate structured Markdown without producing a searchable PDF or running conditional compression.
 
 ### Changed
 
