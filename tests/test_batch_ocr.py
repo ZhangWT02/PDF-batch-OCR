@@ -33,6 +33,7 @@ def make_config(root: Path, **overrides) -> batch_ocr.Config:
         output_suffix="_ocr",
         markdown=True,
         markdown_only=False,
+        weread_markdown=False,
         keep_temp=False,
     )
     values.update(overrides)
@@ -48,6 +49,7 @@ class BatchOcrTests(unittest.TestCase):
         self.assertEqual(args.jpeg_quality, 72)
         self.assertTrue(args.markdown)
         self.assertFalse(args.markdown_only)
+        self.assertFalse(args.weread_markdown)
         self.assertEqual(args.denoise, "median")
         self.assertEqual(args.preprocess_jobs, min(4, batch_ocr.os.cpu_count() or 1))
 
@@ -130,6 +132,55 @@ class BatchOcrTests(unittest.TestCase):
             expected = root / "ocr_output" / "history" / "book_ocr.pdf"
             self.assertEqual(batch_ocr.output_path_for(source, config), expected)
             self.assertEqual(batch_ocr.markdown_path_for(expected), expected.with_suffix(".md"))
+            self.assertEqual(
+                batch_ocr.weread_markdown_path_for(expected.with_suffix(".md")),
+                expected.with_name("book_ocr_weread.md"),
+            )
+
+    def test_weread_postprocessing_removes_running_headers_and_formats_footnotes(self) -> None:
+        markdown = batch_ocr.markdown_from_pages(
+            "Sample Book",
+            [
+                "Sample Book 10\n\nFirst body paragraph.\n\n1. First citation.",
+                "Sample Book 11\n\nSecond body paragraph.\n\n2, Second citation.",
+                "Sample Book 12\n\n1. First list item\n2. Second list item",
+            ],
+        )
+
+        result = batch_ocr.postprocess_markdown_for_weread(markdown)
+
+        self.assertNotIn("Sample Book 10", result)
+        self.assertNotIn("Sample Book 11", result)
+        self.assertNotIn("Sample Book 12", result)
+        self.assertIn("First body paragraph.", result)
+        self.assertIn("> **【注 1】** First citation.", result)
+        self.assertIn("> **【注 2】** Second citation.", result)
+        self.assertIn("1. First list item\n2. Second list item", result)
+        self.assertEqual(result.count("<!-- page:"), 3)
+        self.assertIn("## 阅读分段 1", result)
+
+    def test_weread_postprocessing_is_idempotent(self) -> None:
+        markdown = batch_ocr.markdown_from_pages(
+            "Sample Book",
+            [f"Sample Book {page}\n\nBody {page}." for page in range(1, 5)],
+        )
+
+        once = batch_ocr.postprocess_markdown_for_weread(markdown)
+        twice = batch_ocr.postprocess_markdown_for_weread(once)
+
+        self.assertEqual(twice, once)
+
+    def test_weread_postprocessing_splits_large_books_below_configured_limit(self) -> None:
+        markdown = batch_ocr.markdown_from_pages(
+            "Large Book",
+            [f"Large Book {page}\n\n" + (f"page-{page} " * 700) for page in range(1, 7)],
+        )
+
+        result = batch_ocr.postprocess_markdown_for_weread(markdown, max_section_bytes=10_000)
+        sections = result.split("## 阅读分段 ")[1:]
+
+        self.assertGreater(len(sections), 1)
+        self.assertTrue(all(len(section.encode("utf-8")) <= 10_000 for section in sections))
 
     def test_sidecar_to_markdown_preserves_pages_paragraphs_and_lists(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -308,10 +359,47 @@ class BatchOcrTests(unittest.TestCase):
             build.assert_called_once()
             existing_pdf_extractor.assert_not_called()
 
+    def test_weread_flag_writes_an_additional_markdown_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            source = root / "book.pdf"
+            source.write_bytes(b"source")
+            output = root / "ocr_output" / "book_ocr.pdf"
+            config = make_config(root, markdown_only=True, weread_markdown=True)
+            markdown = batch_ocr.markdown_from_pages(
+                "Book",
+                [f"Book {page}\n\nBody {page}." for page in range(1, 4)],
+            )
+
+            with (
+                patch.object(batch_ocr, "build_preprocessed_pdf", return_value=3),
+                patch.object(batch_ocr, "markdown_from_page_images", return_value=markdown),
+            ):
+                result = batch_ocr.process_one(source, output, config)
+
+            self.assertEqual(result.status, "ok")
+            self.assertEqual(result.markdown_output, output.with_suffix(".md"))
+            self.assertEqual(
+                result.weread_markdown_output,
+                output.with_name("book_ocr_weread.md"),
+            )
+            self.assertTrue(result.markdown_output.exists())
+            self.assertTrue(result.weread_markdown_output.exists())
+            weread_text = result.weread_markdown_output.read_text(encoding="utf-8")
+            self.assertNotIn("Book 1", weread_text)
+            self.assertIn("Body 1.", weread_text)
+
     def test_markdown_only_rejects_no_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             parser = batch_ocr.build_parser()
             args = parser.parse_args([directory, "--markdown-only", "--no-markdown"])
+            with self.assertRaises(SystemExit):
+                batch_ocr.validate_args(args, parser)
+
+    def test_weread_markdown_rejects_no_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            parser = batch_ocr.build_parser()
+            args = parser.parse_args([directory, "--weread-markdown", "--no-markdown"])
             with self.assertRaises(SystemExit):
                 batch_ocr.validate_args(args, parser)
 

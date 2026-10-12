@@ -22,6 +22,7 @@ import io
 import logging
 import math
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -36,8 +37,13 @@ from typing import Iterable, Sequence
 
 LOG = logging.getLogger("batch-ocr")
 MB = 1_000_000
+WEREAD_SECTION_MAX_BYTES = 64 * 1024
 VERSION = "0.1.0"
 IS_WINDOWS = os.name == "nt"
+
+PAGE_MARKER_RE = re.compile(r"(?m)^<!-- page: (\d+) -->[ \t]*$")
+WEREAD_SECTION_RE = re.compile(r"(?m)^## 阅读分段 \d+[ \t]*$\n*")
+FOOTNOTE_RE = re.compile(r"^(\d{1,3})[.,]\s+(.+)$")
 
 
 class ProcessingError(RuntimeError):
@@ -68,6 +74,7 @@ class Config:
     output_suffix: str
     markdown: bool
     markdown_only: bool
+    weread_markdown: bool
     keep_temp: bool
 
 
@@ -82,6 +89,7 @@ class Result:
     after_bytes: int = 0
     message: str = ""
     markdown_output: Path | None = None
+    weread_markdown_output: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +172,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="只生成 Markdown；跳过 OCR PDF 与条件压缩",
     )
+    misc.add_argument(
+        "--weread-markdown",
+        action="store_true",
+        help="额外生成删除重复页眉/页码、整理脚注并按大小分段的微信读书版 Markdown",
+    )
     misc.add_argument("--keep-temp", action="store_true", help="保留中间文件，便于诊断")
     misc.add_argument("-v", "--verbose", action="store_true", help="显示详细日志")
     return parser
@@ -199,6 +212,8 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         parser.error("--output-suffix 为空或包含文件名非法字符")
     if args.markdown_only and not args.markdown:
         parser.error("--markdown-only 不能与 --no-markdown 同时使用")
+    if args.weread_markdown and not args.markdown:
+        parser.error("--weread-markdown 不能与 --no-markdown 同时使用")
 
     return Config(
         input_dir=input_dir,
@@ -223,6 +238,7 @@ def validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) -> 
         output_suffix=args.output_suffix,
         markdown=args.markdown,
         markdown_only=args.markdown_only,
+        weread_markdown=args.weread_markdown,
         keep_temp=args.keep_temp,
     )
 
@@ -311,6 +327,10 @@ def output_path_for(source: Path, config: Config) -> Path:
 
 def markdown_path_for(output: Path) -> Path:
     return output.with_suffix(".md")
+
+
+def weread_markdown_path_for(markdown_output: Path) -> Path:
+    return markdown_output.with_name(f"{markdown_output.stem}_weread.md")
 
 
 def weighted_median(values: Sequence[float], weights: Sequence[float]) -> float:
@@ -714,6 +734,144 @@ def markdown_from_pages(title: str, pages: Sequence[str]) -> str:
     return "\n\n".join(sections).rstrip() + "\n"
 
 
+def split_markdown_pages(content: str) -> tuple[str, list[tuple[int, str]]]:
+    """Split generated Markdown without losing its page boundaries."""
+    cleaned = WEREAD_SECTION_RE.sub("", content)
+    markers = list(PAGE_MARKER_RE.finditer(cleaned))
+    if not markers:
+        return cleaned.strip(), []
+
+    prefix = cleaned[: markers[0].start()].strip()
+    pages: list[tuple[int, str]] = []
+    for index, marker in enumerate(markers):
+        end = markers[index + 1].start() if index + 1 < len(markers) else len(cleaned)
+        pages.append((int(marker.group(1)), cleaned[marker.end() : end].strip()))
+    return prefix, pages
+
+
+def split_markdown_paragraphs(text: str) -> list[str]:
+    return [paragraph.strip() for paragraph in re.split(r"\n[ \t]*\n", text.strip()) if paragraph.strip()]
+
+
+def edge_candidate(paragraph: str) -> str | None:
+    """Return a short single-line page-edge candidate suitable for repetition checks."""
+    compact = " ".join(paragraph.split())
+    if "\n" in paragraph or not compact or len(compact) > 120 or len(compact.split()) > 14:
+        return None
+    return compact
+
+
+def normalize_running_header(text: str) -> str:
+    compact = " ".join(text.split()).strip(" |—–-")
+    compact = re.sub(
+        r"\s+(?:[A-Za-z]{0,2}\d{1,4}|\d{1,4}[A-Za-z]{0,2})$",
+        "",
+        compact,
+    )
+    return compact.casefold()
+
+
+def is_standalone_page_number(text: str) -> bool:
+    compact = " ".join(text.split()).strip()
+    return bool(
+        re.fullmatch(r"(?:\d{1,4}|[ivxlcdm]{1,10}|[A-Za-z]?\W{0,2}\d{1,4})", compact, re.IGNORECASE)
+    )
+
+
+def recurring_edge_keys(pages: Sequence[tuple[int, str]], first: bool) -> set[str]:
+    counts: dict[str, int] = {}
+    for _page_number, page_text in pages:
+        paragraphs = split_markdown_paragraphs(page_text)
+        if not paragraphs:
+            continue
+        candidate = edge_candidate(paragraphs[0] if first else paragraphs[-1])
+        if candidate is None or is_standalone_page_number(candidate):
+            continue
+        key = normalize_running_header(candidate)
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    return {key for key, count in counts.items() if count >= 3}
+
+
+def format_trailing_footnotes(paragraphs: list[str]) -> list[str]:
+    first_footnote = len(paragraphs)
+    while first_footnote:
+        paragraph = paragraphs[first_footnote - 1]
+        if "\n" in paragraph or FOOTNOTE_RE.fullmatch(paragraph) is None:
+            break
+        first_footnote -= 1
+
+    for index in range(first_footnote, len(paragraphs)):
+        match = FOOTNOTE_RE.fullmatch(paragraphs[index])
+        if match is not None:
+            paragraphs[index] = f"> **【注 {match.group(1)}】** {match.group(2)}"
+    return paragraphs
+
+
+def clean_weread_page(page_text: str, header_keys: set[str], footer_keys: set[str]) -> str:
+    paragraphs = split_markdown_paragraphs(page_text)
+    if not paragraphs:
+        return ""
+
+    first = edge_candidate(paragraphs[0])
+    if first is not None and (
+        is_standalone_page_number(first) or normalize_running_header(first) in header_keys
+    ):
+        paragraphs.pop(0)
+
+    if paragraphs:
+        last = edge_candidate(paragraphs[-1])
+        if last is not None and (
+            is_standalone_page_number(last) or normalize_running_header(last) in footer_keys
+        ):
+            paragraphs.pop()
+
+    return "\n\n".join(format_trailing_footnotes(paragraphs))
+
+
+def postprocess_markdown_for_weread(
+    content: str,
+    max_section_bytes: int = WEREAD_SECTION_MAX_BYTES,
+) -> str:
+    """Create a conservative WeRead-oriented variant of generated Markdown."""
+    if max_section_bytes < 1024:
+        raise ValueError("max_section_bytes must be at least 1024")
+
+    prefix, pages = split_markdown_pages(content)
+    if not pages:
+        return content.rstrip() + "\n"
+
+    header_keys = recurring_edge_keys(pages, first=True)
+    footer_keys = recurring_edge_keys(pages, first=False)
+    cleaned_pages = [
+        (page_number, clean_weread_page(page_text, header_keys, footer_keys))
+        for page_number, page_text in pages
+    ]
+
+    sections = [prefix]
+    section_number = 1
+    section_heading = f"## 阅读分段 {section_number}"
+    sections.append(section_heading)
+    current_bytes = len((section_heading + "\n\n").encode("utf-8"))
+
+    for page_number, page_text in cleaned_pages:
+        page_block = f"<!-- page: {page_number} -->"
+        if page_text:
+            page_block += f"\n\n{page_text}"
+        block_bytes = len((page_block + "\n\n").encode("utf-8"))
+        if current_bytes > len((section_heading + "\n\n").encode("utf-8")) and (
+            current_bytes + block_bytes > max_section_bytes
+        ):
+            section_number += 1
+            section_heading = f"## 阅读分段 {section_number}"
+            sections.append(section_heading)
+            current_bytes = len((section_heading + "\n\n").encode("utf-8"))
+        sections.append(page_block)
+        current_bytes += block_bytes
+
+    return "\n\n".join(part for part in sections if part).rstrip() + "\n"
+
+
 def markdown_from_sidecar(title: str, sidecar: Path, page_count: int) -> str:
     text = sidecar.read_text(encoding="utf-8", errors="replace")
     pages = text.replace("\r\n", "\n").replace("\r", "\n").split("\f")
@@ -997,6 +1155,19 @@ def write_markdown(destination: Path, content: str) -> None:
             staging.unlink()
 
 
+def write_markdown_outputs(
+    markdown_output: Path,
+    content: str,
+    weread: bool,
+) -> tuple[Path, Path | None]:
+    write_markdown(markdown_output, content)
+    weread_output = None
+    if weread:
+        weread_output = weread_markdown_path_for(markdown_output)
+        write_markdown(weread_output, postprocess_markdown_for_weread(content))
+    return markdown_output, weread_output
+
+
 def find_tesseract() -> str | None:
     executable = shutil.which("tesseract")
     if executable:
@@ -1141,7 +1312,30 @@ def safe_temp_directory(source: Path, keep: bool) -> tuple[Path, tempfile.Tempor
 def process_one(source: Path, output: Path, config: Config) -> Result:
     started = time.monotonic()
     markdown_output = markdown_path_for(output)
+    weread_output = weread_markdown_path_for(markdown_output)
     if config.markdown_only and markdown_output.exists() and not config.overwrite:
+        if config.weread_markdown and not weread_output.exists():
+            try:
+                content = markdown_output.read_text(encoding="utf-8")
+                write_markdown(weread_output, postprocess_markdown_for_weread(content))
+                return Result(
+                    source=source,
+                    output=None,
+                    status="ok",
+                    elapsed_seconds=time.monotonic() - started,
+                    message="原始 Markdown 已存在；已补生成微信读书版 Markdown",
+                    markdown_output=markdown_output,
+                    weread_markdown_output=weread_output,
+                )
+            except Exception as exc:
+                return Result(
+                    source=source,
+                    output=None,
+                    status="failed",
+                    elapsed_seconds=time.monotonic() - started,
+                    message=f"无法补生成微信读书版 Markdown：{exc}",
+                    markdown_output=markdown_output,
+                )
         return Result(
             source,
             None,
@@ -1149,12 +1343,17 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
             0.0,
             message="Markdown 输出已存在",
             markdown_output=markdown_output,
+            weread_markdown_output=weread_output if weread_output.exists() else None,
         )
     if not config.markdown_only and output.exists() and not config.overwrite:
         if config.markdown and not markdown_output.exists():
             try:
                 content = markdown_from_pdf(source.stem, output)
-                write_markdown(markdown_output, content)
+                _, written_weread = write_markdown_outputs(
+                    markdown_output,
+                    content,
+                    config.weread_markdown,
+                )
                 return Result(
                     source,
                     output,
@@ -1162,6 +1361,7 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
                     time.monotonic() - started,
                     message="PDF 已存在；已从文字层补生成 Markdown",
                     markdown_output=markdown_output,
+                    weread_markdown_output=written_weread,
                 )
             except Exception as exc:
                 return Result(
@@ -1171,6 +1371,28 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
                     time.monotonic() - started,
                     message=f"输出已存在，但无法补生成 Markdown：{exc}",
                 )
+        if config.weread_markdown and markdown_output.exists() and not weread_output.exists():
+            try:
+                content = markdown_output.read_text(encoding="utf-8")
+                write_markdown(weread_output, postprocess_markdown_for_weread(content))
+                return Result(
+                    source=source,
+                    output=output,
+                    status="ok",
+                    elapsed_seconds=time.monotonic() - started,
+                    message="PDF 和原始 Markdown 已存在；已补生成微信读书版 Markdown",
+                    markdown_output=markdown_output,
+                    weread_markdown_output=weread_output,
+                )
+            except Exception as exc:
+                return Result(
+                    source=source,
+                    output=output,
+                    status="failed",
+                    elapsed_seconds=time.monotonic() - started,
+                    message=f"无法补生成微信读书版 Markdown：{exc}",
+                    markdown_output=markdown_output,
+                )
         return Result(
             source,
             output,
@@ -1178,6 +1400,7 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
             0.0,
             message="输出已存在",
             markdown_output=markdown_output if markdown_output.exists() else None,
+            weread_markdown_output=weread_output if weread_output.exists() else None,
         )
 
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -1200,14 +1423,21 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
         if config.markdown_only:
             LOG.info("    已生成 %d 页预处理图像", page_count)
             markdown_content = markdown_from_page_images(source.stem, pages_dir, page_count, config)
-            write_markdown(markdown_output, markdown_content)
+            _, written_weread = write_markdown_outputs(
+                markdown_output,
+                markdown_content,
+                config.weread_markdown,
+            )
             LOG.info("    已生成 Markdown：%s", markdown_output)
+            if written_weread is not None:
+                LOG.info("    已生成微信读书版 Markdown：%s", written_weread)
             return Result(
                 source=source,
                 output=None,
                 status="ok",
                 elapsed_seconds=time.monotonic() - started,
                 markdown_output=markdown_output,
+                weread_markdown_output=written_weread,
             )
 
         LOG.info("    已生成 %d 页预处理 PDF", page_count)
@@ -1274,11 +1504,17 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
         shutil.copyfile(selected, staging)
         os.replace(staging, output)
         written_markdown = None
+        written_weread = None
         if markdown_content is not None:
             try:
-                write_markdown(markdown_output, markdown_content)
-                written_markdown = markdown_output
+                written_markdown, written_weread = write_markdown_outputs(
+                    markdown_output,
+                    markdown_content,
+                    config.weread_markdown,
+                )
                 LOG.info("    已生成 Markdown：%s", markdown_output)
+                if written_weread is not None:
+                    LOG.info("    已生成微信读书版 Markdown：%s", written_weread)
             except Exception as exc:
                 notice = f"Markdown 写入失败：{exc}"
                 warnings.append(notice)
@@ -1293,6 +1529,7 @@ def process_one(source: Path, output: Path, config: Config) -> Result:
             after_bytes=after_bytes,
             message="；".join(warnings),
             markdown_output=written_markdown,
+            weread_markdown_output=written_weread,
         )
     except Exception as exc:
         return Result(
@@ -1333,6 +1570,8 @@ def print_summary(results: Sequence[Result]) -> None:
                 outputs.append(str(result.output))
             if result.markdown_output is not None:
                 outputs.append(str(result.markdown_output))
+            if result.weread_markdown_output is not None:
+                outputs.append(str(result.weread_markdown_output))
             print(f"  [{label}] {result.source.name} -> {', '.join(outputs)}{compression}{warning}")
         elif result.status == "skipped":
             print(f"  [跳过] {result.source.name}：{result.message}")

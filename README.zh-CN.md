@@ -172,6 +172,14 @@ python .\batch_ocr.py "D:\Books\待处理" --no-markdown
 python .\batch_ocr.py "D:\Books\待处理" --markdown-only
 ```
 
+如需在保留原始 Markdown 的同时额外生成微信读书适配版：
+
+```powershell
+python .\batch_ocr.py "D:\Books\待处理" --weread-markdown
+```
+
+附加文件命名为 `书名_ocr_weread.md`。后处理会删除重复页眉和独立页码，将页尾连续编号脚注显示为注释块，并在单个阅读分段达到 64 KiB 前插入分段标题。
+
 指定任意已安装的 Tesseract 语言或语言组合，例如繁体中文和英文：
 
 ```powershell
@@ -204,6 +212,8 @@ python .\batch_ocr.py --help
 - Markdown 使用 Tesseract TSV 词坐标和栏间空白检测恢复阅读顺序；规则双栏会先输出完整左栏，再输出右栏，并会保留段落空行、合并段内换行及修复英文行末断词。
 - 为获得词坐标，默认 Markdown 会额外执行一次 Tesseract 结构化识别，因此总处理时间会比仅生成 PDF 更长；可用 `--no-markdown` 关闭。
 - `--markdown-only` 会直接执行页面预处理和结构化 Tesseract 识别，但跳过 OCRmyPDF、PDF 组装及 Ghostscript 压缩；不能与 `--no-markdown` 同时使用。
+- `--weread-markdown` 不修改原始 `*_ocr.md`，只额外生成 `*_ocr_weread.md`；已有原始 Markdown 时也可以直接补生成适配版，无需重新 OCR。
+- 微信读书版的脚注识别采取保守策略：只转换每页末尾连续出现的编号段落，不会自动链接已经被 OCR 识别错误的正文脚注标号。
 - Markdown 是内容结构副本，不会复刻 PDF 的字体和精确坐标；复杂表格、跨栏标题或非常规版式仍可能需要人工调整或专用版面分析模型。
 - 自动纠偏处理的是常见的小角度歪斜；90/180/270 度方向由 OCRmyPDF 的自动旋转处理。
 - `--preprocess-jobs` 控制渲染、纠偏、去噪、可选二值化和 JPEG/PNG 编码的并行进程数；`--jobs` 仅控制后续 OCR。

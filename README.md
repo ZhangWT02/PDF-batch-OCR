@@ -167,6 +167,14 @@ If you only need Markdown, skip searchable-PDF generation and conditional compre
 python .\batch_ocr.py "D:\Books\ToProcess" --markdown-only
 ```
 
+To also create a WeRead-oriented Markdown copy while preserving the original Markdown:
+
+```powershell
+python .\batch_ocr.py "D:\Books\ToProcess" --weread-markdown
+```
+
+The additional file is named `book_ocr_weread.md`. It removes recurring running headers and standalone page numbers, renders trailing numbered footnotes as visible note blocks, and inserts reading sections before they reach 64 KiB.
+
 Choose any installed Tesseract language or language combination—for example, Traditional Chinese and English:
 
 ```powershell
@@ -199,6 +207,8 @@ The compression stage does not rasterize the whole page. Ghostscript is configur
 - Markdown uses Tesseract TSV word coordinates and column-gutter detection to restore reading order. Regular two-column pages are emitted as the complete left column followed by the right column, while paragraph breaks are retained, wrapped lines are joined, and English end-of-line hyphenation is repaired.
 - Word coordinates require an additional structured Tesseract pass when Markdown is enabled, so total processing takes longer than PDF-only output. Use `--no-markdown` to disable it.
 - `--markdown-only` runs the page preprocessing and structured Tesseract pass directly, but skips OCRmyPDF, PDF assembly, and Ghostscript compression. It cannot be combined with `--no-markdown`.
+- `--weread-markdown` keeps the original `*_ocr.md` unchanged and adds `*_ocr_weread.md`. It can also backfill the WeRead copy from an existing Markdown file without rerunning OCR.
+- WeRead footnote formatting is deliberately conservative: only consecutive numbered paragraphs at the end of a page are converted. OCR-damaged in-text note markers are not automatically linked.
 - Markdown is a content-structure copy, not a reproduction of PDF fonts or exact coordinates. Complex tables, spanning headings, and irregular layouts may still require manual editing or a specialized layout-analysis model.
 - Deskew corrects common small-angle page skew; OCRmyPDF handles 90/180/270-degree orientation with automatic rotation.
 - `--preprocess-jobs` controls parallel rendering, deskewing, denoising, optional binarization, and JPEG/PNG encoding. `--jobs` controls the later OCR stage only.
